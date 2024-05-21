@@ -1,7 +1,7 @@
 import numpy as np
 from scipy import signal
 from preprocess.band_filter import BandpassFilter
-from preprocess.preprocess_signal import preprocess_signal
+from preprocess.preprocess import preprocess_signal
 
 def get_rr(sig, fs, preprocess=True):
     ti = len(sig)/fs
