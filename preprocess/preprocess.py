@@ -4,7 +4,7 @@ from preprocess.band_filter import BandpassFilter
 from scipy.signal import detrend, resample, butter, filtfilt
 import pywt
 
-def bandpass_filter(signal, fs, lowcut=0.1, highcut=0.5, order=4):
+def bandpass_filter(signal, fs, lowcut=0.1, highcut=0.5, order=2):
     nyquist = 0.5 * fs
     low = lowcut / nyquist
     high = highcut / nyquist
@@ -21,8 +21,15 @@ def wavelet_denoise(signal, wavelet='db4', level=1):
     denoised_signal = pywt.waverec(denoised_coeffs, wavelet, mode='periodization')
     return denoised_signal
 
-def preprocess_signal(signal, fs):
-    filtered_signal = bandpass_filter(signal, fs)
+def preprocess_signal(signal, fs,lowcut=0.1, highcut=0.5,signal_type='ECG'):
+    if signal_type == 'ECG':
+        lowcut = 0.1
+        highcut = 0.5
+    elif signal_type == 'PPG':
+        lowcut = 0.1
+        highcut = 0.4
+    
+    filtered_signal = bandpass_filter(signal, fs, lowcut, highcut)
     denoised_signal = wavelet_denoise(filtered_signal)
     return denoised_signal
 

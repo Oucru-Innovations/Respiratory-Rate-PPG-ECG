@@ -8,28 +8,10 @@ import pywt
 import pandas as pd
 from statsmodels.tsa.ar_model import AutoReg
 import matplotlib.pyplot as plt
+import sys
+sys.path.append('.')
+from preprocess.preprocess import preprocess_signal
 
-def bandpass_filter(signal, fs, lowcut=0.1, highcut=0.5, order=4):
-    nyquist = 0.5 * fs
-    low = lowcut / nyquist
-    high = highcut / nyquist
-    b, a = butter(order, [low, high], btype='band')
-    filtered_signal = filtfilt(b, a, signal)
-    return filtered_signal
-
-def wavelet_denoise(signal, wavelet='db4', level=1):
-    coeffs = pywt.wavedec(signal, wavelet, mode='periodization')
-    sigma = (1/0.6745) * np.median(np.abs(coeffs[-level] - np.median(coeffs[-level])))
-    uthresh = sigma * np.sqrt(2 * np.log(len(signal)))
-    denoised_coeffs = coeffs[:]
-    denoised_coeffs[1:] = [pywt.threshold(i, value=uthresh, mode='soft') for i in denoised_coeffs[1:]]
-    denoised_signal = pywt.waverec(denoised_coeffs, wavelet, mode='periodization')
-    return denoised_signal
-
-def preprocess_signal(signal, fs):
-    filtered_signal = bandpass_filter(signal, fs)
-    denoised_signal = wavelet_denoise(filtered_signal)
-    return denoised_signal
 
 def calculate_rr_from_ar_poles(sig, fs, order=8, method='max_power'):
 
@@ -48,8 +30,10 @@ def calculate_rr_from_ar_poles(sig, fs, order=8, method='max_power'):
     # Convert angles to normalized frequencies (cycles/sample)
     frequencies_norm = angles * fs / (2 * np.pi)
     
+    # # Convert normalized frequencies to frequencies in Hz
+    # frequencies_hz = frequencies_norm / (fs/2)
     # Convert normalized frequencies to frequencies in Hz
-    frequencies_hz = frequencies_norm / (fs/2)
+    frequencies_hz = frequencies_norm / fs
     
     # Convert frequencies from Hz to breaths per minute (BPM)
     frequencies_bpm = np.abs(frequencies_hz) * 60
@@ -72,9 +56,9 @@ def calculate_rr_from_ar_poles(sig, fs, order=8, method='max_power'):
     
     return dominant_frequency
 
-def get_rr(signal, fs, preprocess=True, order=10):
+def get_rr(signal, fs, signal_type='ECG', preprocess=True, order=10):
     if preprocess:
-        signal = preprocess_signal(signal, fs)
+        signal = preprocess_signal(signal, fs,signal_type)
     
     rr_bpm = calculate_rr_from_ar_poles(signal, fs, order=order)
     
@@ -82,9 +66,18 @@ def get_rr(signal, fs, preprocess=True, order=10):
 
 if __name__ == "__main__":
 
+    
     calculated_fs = 256
+    signal_type='ECG'
     ecg_data_path = "dataset/public_ecg_data.csv"
     ecg_target_path = "dataset/public_ecg_target.csv"
+    
+    # calculated_fs = 100
+    # signal_type='PPG'
+    # ecg_data_path = "dataset/public_ppg_data.csv"
+    # ecg_target_path = "dataset/public_ppg_target.csv"
+    
+    
     # Load the ECG data and target files again, ensuring correct parsing
     ecg_data = pd.read_csv(ecg_data_path, header=None)
     ecg_target = pd.read_csv(ecg_target_path, header=None)

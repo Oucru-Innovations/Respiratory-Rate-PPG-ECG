@@ -2,58 +2,80 @@ import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
 import pywt
 import pandas as pd
+from scipy.signal import butter, filtfilt, find_peaks, welch
+from scipy.interpolate import interp1d
+import sys
+sys.path.append('.')
+from preprocess.preprocess import preprocess_signal
 
-def bandpass_filter(signal, fs, lowcut=0.1, highcut=0.5, order=4):
-    nyquist = 0.5 * fs
-    low = lowcut / nyquist
-    high = highcut / nyquist
-    b, a = butter(order, [low, high], btype='band')
-    filtered_signal = filtfilt(b, a, signal)
-    return filtered_signal
-
-def wavelet_denoise(signal, wavelet='db4', level=1):
-    coeffs = pywt.wavedec(signal, wavelet, mode='periodization')
-    sigma = (1/0.6745) * np.median(np.abs(coeffs[-level] - np.median(coeffs[-level])))
-    uthresh = sigma * np.sqrt(2 * np.log(len(signal)))
-    denoised_coeffs = coeffs[:]
-    denoised_coeffs[1:] = [pywt.threshold(i, value=uthresh, mode='soft') for i in denoised_coeffs[1:]]
-    denoised_signal = pywt.waverec(denoised_coeffs, wavelet, mode='periodization')
-    return denoised_signal
-
-def preprocess_signal(signal, fs):
-    filtered_signal = bandpass_filter(signal, fs)
-    denoised_signal = wavelet_denoise(filtered_signal)
-    return denoised_signal
-
-def get_rr(signal, fs, max_rr=32, prominence=0.4):
-    # Preprocess the signal
-    signal = preprocess_signal(signal, fs)
+def detect_peaks(signal, fs, min_rr=6, max_rr=30):
+    # Apply preprocessing to the signal
+    preprocessed_signal = preprocess_signal(signal, fs, signal_type='PPG')
     
-    # Calculate the minimum and maximum distances between peaks
-    min_distance = fs * 60 / max_rr  
+    # Define the distance based on expected respiratory rate range
+    min_distance = int(fs * 60 / max_rr)
+    max_distance = int(fs * 60 / min_rr)
     
-    # Detect peaks with adjusted prominence
-    peaks, _ = find_peaks(signal, distance=min_distance, 
-                          prominence=prominence)
+    # Dynamic peak detection with adaptive thresholding
+    peaks, _ = find_peaks(preprocessed_signal, distance=min_distance, height=None)
     
-    # Calculate the respiratory rate
     if len(peaks) < 2:
-        return 0  # Not enough peaks to calculate RR
+        height_threshold = np.mean(preprocessed_signal) + 0.2 * np.std(preprocessed_signal)
+        peaks, _ = find_peaks(preprocessed_signal, distance=min_distance, height=height_threshold)
     
-    # Calculate the time differences between adjacent peaks
-    peak_intervals = np.diff(peaks[-2:]) / fs  # Convert samples to seconds
+    if len(peaks) < 2:
+        height_threshold = np.mean(preprocessed_signal) + 0.1 * np.std(preprocessed_signal)
+        peaks, _ = find_peaks(preprocessed_signal, distance=min_distance, height=height_threshold)
     
-    # Compute the mean interval
-    mean_interval = np.mean(peak_intervals)
+    # Filter out peaks that are too close to each other
+    filtered_peaks = []
+    for i in range(len(peaks) - 1):
+        if min_distance <= (peaks[i+1] - peaks[i]) <= max_distance:
+            filtered_peaks.append(peaks[i])
+    if len(peaks) > 0:
+        filtered_peaks.append(peaks[-1])  # Include the last peak if valid
     
-    # Convert the mean interval to respiratory rate in BPM
-    rr_bpm = 60 / mean_interval  # Calculate BPM
+    return np.array(filtered_peaks)
+
+def calculate_respiratory_rate_from_cta(peaks, fs):
+    if len(peaks) < 2:
+        return 0  # Not enough peaks to calculate a respiratory rate
+
+    # Calculate the intervals between peaks
+    intervals = np.diff(peaks) / fs  # Convert from samples to seconds
+    
+    # Filter out unrealistic intervals
+    min_interval = 60 / 30  # Maximum respiratory rate: 30 breaths per minute
+    max_interval = 60 / 6   # Minimum respiratory rate: 6 breaths per minute
+    valid_intervals = intervals[(intervals >= min_interval) & (intervals <= max_interval)]
+    
+    if len(valid_intervals) == 0:
+        return 0
+    
+    # Calculate the mean interval
+    mean_interval = np.mean(valid_intervals)
+    
+    # Convert the mean interval to respiratory rate in breaths per minute
+    rr_bpm = 60 / mean_interval
+    
+    return rr_bpm
+
+def get_rr(signal, fs, signal_type='ECG', preprocess=True):
+    if preprocess:
+        signal = preprocess_signal(signal, fs, signal_type)
+    
+    # Detect peaks in the signal
+    peaks = detect_peaks(signal, fs)
+    
+    # Calculate the respiratory rate from the detected peaks
+    rr_bpm = calculate_respiratory_rate_from_cta(peaks, fs)
     
     return rr_bpm
 
 
 if __name__ == "__main__":
     calculated_fs = 256
+    signal_type='ECG'
     ecg_data_path = "dataset/public_ecg_data.csv"
     ecg_target_path = "dataset/public_ecg_target.csv"
     # Load the ECG data and target files again, ensuring correct parsing

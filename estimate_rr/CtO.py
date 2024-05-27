@@ -6,28 +6,9 @@ from scipy.signal import butter, filtfilt, argrelmax, argrelmin, find_peaks
 import pandas as pd
 # from preprocess.preprocess import preprocess_signal
 import pywt
-
-def bandpass_filter(signal, fs, lowcut=0.1, highcut=0.5, order=4):
-    nyquist = 0.5 * fs
-    low = lowcut / nyquist
-    high = highcut / nyquist
-    b, a = butter(order, [low, high], btype='band')
-    filtered_signal = filtfilt(b, a, signal)
-    return filtered_signal
-
-def wavelet_denoise(signal, wavelet='db4', level=1):
-    coeffs = pywt.wavedec(signal, wavelet, mode='periodization')
-    sigma = (1/0.6745) * np.median(np.abs(coeffs[-level] - np.median(coeffs[-level])))
-    uthresh = sigma * np.sqrt(2 * np.log(len(signal)))
-    denoised_coeffs = coeffs[:]
-    denoised_coeffs[1:] = [pywt.threshold(i, value=uthresh, mode='soft') for i in denoised_coeffs[1:]]
-    denoised_signal = pywt.waverec(denoised_coeffs, wavelet, mode='periodization')
-    return denoised_signal
-
-def preprocess_signal(signal, fs):
-    filtered_signal = bandpass_filter(signal, fs)
-    denoised_signal = wavelet_denoise(filtered_signal)
-    return denoised_signal
+import sys
+sys.path.append('.')
+from preprocess.preprocess import preprocess_signal
 
 def get_valid_rr(sig, local_min, local_max, thres):
     resp_markers = []
@@ -40,7 +21,7 @@ def get_valid_rr(sig, local_min, local_max, thres):
             resp_markers.append((rel_peaks[i], rel_peaks[i + 1]))
     return resp_markers
 
-def get_rr(sig, fs, preprocess=True):
+def get_rr(sig, fs, preprocess=True,signal_type='ECG'):
     if preprocess:
         sig = preprocess_signal(sig, fs)
     
