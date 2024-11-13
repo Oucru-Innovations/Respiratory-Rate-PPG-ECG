@@ -1,54 +1,75 @@
 import numpy as np
-from scipy.signal import butter, filtfilt, find_peaks, welch
-import pywt
-import pandas as pd
+from scipy.fft import fft, fftfreq
 from PyEMD import EMD
-import sys
-sys.path.append('.')
 from preprocess.preprocess import preprocess_signal
-from scipy.interpolate import interp1d
 
 def estimate_rr_emd(signal, fs):
-    
-    # Decompose the signal into IMFs using EMD
+    """Estimate respiratory rate using Empirical Mode Decomposition (EMD).
+
+    Parameters
+    ----------
+    signal : array-like
+        Input signal.
+    fs : int
+        Sampling frequency of the signal.
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute, or 0 if no relevant IMF is found.
+    """
+    # Decompose the signal into Intrinsic Mode Functions (IMFs)
     emd = EMD()
     imfs = emd(signal)
-    
-    # Calculate the power spectral density of each IMF
-    imf_psds = [np.abs(np.fft.fft(imf))**2 for imf in imfs]
-    freqs = np.fft.fftfreq(len(signal), d=1/fs)
-    
-    # Select the IMF with the dominant frequency in the respiratory range (0.1 to 0.5 Hz)
+
+    # Calculate power spectral density of each IMF and identify the one in the respiratory range
+    freqs = fftfreq(len(signal), d=1/fs)
+    resp_range = (freqs >= 0.1) & (freqs <= 0.5)
     best_imf = None
     max_power = 0
-    for imf, psd in zip(imfs, imf_psds):
-        resp_range = (freqs >= 0.1) & (freqs <= 0.5)
+
+    for imf in imfs:
+        psd = np.abs(fft(imf)) ** 2
         resp_psd = psd[resp_range]
-        if len(resp_psd) > 0:
+
+        if resp_psd.size > 0:
             max_resp_power = np.max(resp_psd)
             if max_resp_power > max_power:
                 max_power = max_resp_power
                 best_imf = imf
-    
-    if best_imf is None:
-        return 0  # No relevant IMF found
-    
-    # Calculate the dominant frequency of the selected IMF
-    imf_psd = np.abs(np.fft.fft(best_imf))**2
-    dominant_freq = freqs[np.argmax(imf_psd)]
-    
-    # Convert the frequency to respiratory rate in breaths per minute
-    rr_bpm = np.abs(dominant_freq) * 60
-    
-    return rr_bpm
 
+    if best_imf is None:
+        return 0  # No IMF with relevant respiratory frequency found
+
+    # Calculate dominant frequency of the selected IMF
+    imf_psd = np.abs(fft(best_imf)) ** 2
+    dominant_freq = freqs[np.argmax(imf_psd)]
+
+    return np.abs(dominant_freq) * 60  # Convert to breaths per minute
 
 def get_rr(signal, fs, preprocess=True, signal_type='ECG'):
+    """Estimate respiratory rate by applying EMD-based approach.
+
+    Parameters
+    ----------
+    signal : array-like
+        Input signal.
+    fs : int
+        Sampling frequency of the signal.
+    preprocess : bool, default=True
+        Whether to preprocess the signal before estimating respiratory rate.
+    signal_type : str, default='ECG'
+        Type of signal ('ECG' or 'PPG').
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute.
+    """
     if preprocess:
-        signal = preprocess_signal(signal, fs,signal_type=signal_type)
-    
-    rr_bpm = estimate_rr_emd(signal, fs)
-    return rr_bpm
+        signal = preprocess_signal(signal, fs, signal_type=signal_type)
+
+    return estimate_rr_emd(signal, fs)
 
 
 # if __name__ == "__main__":

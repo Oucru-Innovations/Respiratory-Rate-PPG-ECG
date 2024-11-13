@@ -50,6 +50,9 @@ coverage.xml
 .dmypy.json
 dmypy.json
 
+# Ignore model path files
+*.pth
+
 # Ignore temporary files and directories
 *.log
 *.tmp

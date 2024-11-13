@@ -1,88 +1,109 @@
 import numpy as np
 import os,sys
 sys.path.append('.')
-from scipy.signal import butter, filtfilt, find_peaks
+from scipy.signal import find_peaks
 from statsmodels.tsa.ar_model import AutoReg
 from preprocess.preprocess import preprocess_signal
-import pandas as pd
-import pywt
 
 mother_wavelets = ['db4', 'sym4', 'coif1', 'bior1.3', 'rbio1.3']
 # Selected modes to try
 selected_modes = ['zero', 'constant', 'symmetric', 'periodic', 
-                  'smooth', 'reflect', 'periodization']
+                'smooth', 'reflect', 'periodization']
 
+def estimate_rr_ar_1(sig, fs, interval_lb=0.5, interval_hb=10, amplitude_threshold=0.5):
+    """Estimate respiratory rate using peak detection in a signal.
 
-def estimate_rr_ar_1(sig, fs, 
-                    trapezoid_fs_ratio = 0.7,
-                    interval_lb = 0.5, interval_hb = 10, 
-                    amplitude_mean_ratio=0.7,slope_lb= 0.1, area_lb=0.5):
-       
-    # Detect peaks in the filtered signal
-    peaks, properties = find_peaks(sig, distance=fs*0.6, height=np.median(sig)*0.5)  # Minimum distance of 0.5 seconds between peaks, # Lowered the height threshold
-    peak_intervals = np.diff(peaks) / fs  # Convert to seconds
-    
-    # Analyze peak properties to eliminate invalid peaks
-    valid_peaks = []
-    for i in range(1, len(peaks)):
-        interval = peak_intervals[i-1]
-        amplitude = properties["peak_heights"][i]
-        # Additional criteria: slope and area under the peak
-        # slope = (sig[peaks[i]] - sig[peaks[i]-1]) / (1 / fs)
-        # area = np.trapz(sig[peaks[i]-int(fs*trapezoid_fs_ratio):peaks[i]+int(fs*trapezoid_fs_ratio)], dx=1/fs)
-        # Add rules for eliminating invalid peaks based on interval and amplitude
-        if 0.5 <= interval <= 5 and amplitude > np.mean(sig) * 0.5:
-        # if (interval_lb <= interval <= interval_hb) and (amplitude > np.mean(sig) * amplitude_mean_ratio) \
-        #     and (slope > slope_lb) and (area > area_lb):
-            valid_peaks.append(peaks[i])
+    Parameters
+    ----------
+    sig : array-like
+        Input signal.
+    fs : int
+        Sampling frequency of the signal.
+    interval_lb : float, default=0.5
+        Lower bound for valid peak intervals in seconds.
+    interval_hb : float, default=10
+        Upper bound for valid peak intervals in seconds.
+    amplitude_threshold : float, default=0.5
+        Ratio of mean signal amplitude for thresholding peaks.
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute, or None if insufficient peaks are found.
+    """
+    peaks, properties = find_peaks(sig, distance=fs * 0.6, height=np.median(sig) * amplitude_threshold)
+    peak_intervals = np.diff(peaks) / fs  # Intervals between peaks in seconds
+
+    valid_peaks = [
+        peaks[i] for i in range(1, len(peaks))
+        if interval_lb <= peak_intervals[i - 1] <= interval_hb and properties["peak_heights"][i] > np.mean(sig) * amplitude_threshold
+    ]
     
     if len(valid_peaks) < 2:
-        return None  # Not enough valid peaks to estimate respiratory rate
-    
-    valid_intervals = np.diff(valid_peaks) / fs  # Convert to seconds
-    rr_bpm = 60 / np.mean(valid_intervals)  # Convert to breaths per minute
+        return None  # Not enough peaks to estimate respiratory rate
+
+    valid_intervals = np.diff(valid_peaks) / fs
+    rr_bpm = 60 / np.mean(valid_intervals)  # Breaths per minute
     return rr_bpm
 
-def estimate_rr_ar_2(sig, fs, preprocess=True, signal_type='ECG'):
+def estimate_rr_ar_2(sig, fs):
+    """Estimate respiratory rate using autoregressive (AR) model on the signal.
 
-    # Fit an AR model to the signal
-    model = AutoReg(sig, lags=2, old_names=False)
-    model_fit = model.fit()
-    
-    # Get the AR coefficients
-    ar_params = model_fit.params
-    
-    # Calculate the power spectral density of the AR process
-    ar_psd = np.abs(np.fft.fft(ar_params, n=fs))**2
-    
-    # Identify the dominant frequency corresponding to the respiratory rate
+    Parameters
+    ----------
+    sig : array-like
+        Input signal.
+    fs : int
+        Sampling frequency of the signal.
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute.
+    """
+    model = AutoReg(sig, lags=2, old_names=False).fit()
+    ar_params = model.params
+
+    ar_psd = np.abs(np.fft.fft(ar_params, n=fs)) ** 2  # Power spectral density
     freqs = np.fft.fftfreq(fs)
-    resp_freq_idx = np.argmax(ar_psd)
-    resp_freq = freqs[resp_freq_idx]
-    
-    # Convert the frequency to respiratory rate in breaths per minute
-    rr_bpm = np.abs(resp_freq) * 60
-    
+    resp_freq = freqs[np.argmax(ar_psd)]  # Dominant frequency
+
+    rr_bpm = np.abs(resp_freq) * 60  # Convert frequency to breaths per minute
     return rr_bpm
 
-def get_rr(sig, fs, signal_type='ECG',preprocess=True, use_wavelet=True):
+def get_rr(sig, fs, signal_type='ECG', preprocess=True):
+    """Estimate respiratory rate by combining results from multiple AR models.
+
+    Parameters
+    ----------
+    sig : array-like
+        Input signal.
+    fs : int
+        Sampling frequency of the signal.
+    signal_type : str, default='ECG'
+        Type of signal ('ECG' or 'PPG').
+    preprocess : bool, default=True
+        Whether to preprocess the signal before estimating respiratory rate.
+
+    Returns
+    -------
+    float
+        Combined estimated respiratory rate in breaths per minute.
+    """
     if preprocess:
-        sig = preprocess_signal(sig,fs,signal_type)
-    
-    rr_bpm_ar_rr1 = estimate_rr_ar_1(sig, fs, preprocess, signal_type)
-    rr_bpm_ar_rr2 = estimate_rr_ar_2(sig, fs, preprocess, signal_type)
-    
-    # Combine the results
-    if rr_bpm_ar_rr1 is None:
-        if rr_bpm_ar_rr2 is None:
-            return 0
+        sig = preprocess_signal(sig, fs, signal_type)
+
+    rr_bpm_ar_rr1 = estimate_rr_ar_1(sig, fs)
+    rr_bpm_ar_rr2 = estimate_rr_ar_2(sig, fs)
+
+    if rr_bpm_ar_rr1 is None and rr_bpm_ar_rr2 is None:
+        return 0
+    elif rr_bpm_ar_rr1 is None:
         return rr_bpm_ar_rr2
     elif rr_bpm_ar_rr2 is None:
         return rr_bpm_ar_rr1
     else:
-        rr_bpm_combined = (rr_bpm_ar_rr1 + rr_bpm_ar_rr2) / 2
-    
-    return rr_bpm_combined
+        return (rr_bpm_ar_rr1 + rr_bpm_ar_rr2) / 2  # Combined estimate
 
 # if __name__ == "__main__":
 

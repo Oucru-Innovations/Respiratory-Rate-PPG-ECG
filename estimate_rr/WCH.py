@@ -1,153 +1,120 @@
 import numpy as np
-from scipy import signal
-import scipy
-import numpy as np
-import os,sys
-sys.path.append('.')
-from scipy.signal import butter, filtfilt, find_peaks
-from statsmodels.tsa.ar_model import AutoReg
+from scipy.signal import find_peaks, welch, stft
+from scipy.fft import fft, fftfreq
 from preprocess.preprocess import preprocess_signal
-import pandas as pd
-from scipy.signal import butter, filtfilt, welch
-import pywt
-from scipy.signal import stft
-
 
 def estimate_rr_fft(sig, fs):
-    
-    # Compute FFT and power spectral density
-    freqs = np.fft.fftfreq(len(sig), 1/fs)
-    fft_spectrum = np.fft.fft(sig)
-    psd = np.abs(fft_spectrum)**2
-    
-    # Identify the dominant frequency within the respiratory range (0.1 to 0.5 Hz)
+    """Estimate respiratory rate using FFT analysis.
+
+    Parameters
+    ----------
+    sig : array-like
+        Input signal.
+    fs : int
+        Sampling frequency.
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute.
+    """
+    freqs = fftfreq(len(sig), 1 / fs)
+    fft_spectrum = fft(sig)
+    psd = np.abs(fft_spectrum) ** 2
+
+    # Select respiratory frequency range
     resp_range = (freqs >= 0.1) & (freqs <= 0.5)
-    resp_psd = psd[resp_range]
-    resp_freqs = freqs[resp_range]
+    resp_psd, resp_freqs = psd[resp_range], freqs[resp_range]
     
-    if len(resp_freqs) == 0:
+    if resp_freqs.size == 0:
         return 0  # No valid respiratory frequency found
-    
+
     dominant_freq = resp_freqs[np.argmax(resp_psd)]
-    
-    # Convert the frequency to respiratory rate in breaths per minute
-    rr_bpm = np.abs(dominant_freq) * 60
-    
-    return rr_bpm
+    return np.abs(dominant_freq) * 60  # Convert to breaths per minute
 
 def estimate_rr_welch(sig, fs):
-    
-    # Compute Welch's power spectral density
+    """Estimate respiratory rate using Welch's method for power spectral density.
+
+    Parameters
+    ----------
+    sig : array-like
+        Input signal.
+    fs : int
+        Sampling frequency.
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute.
+    """
     freqs, psd = welch(sig, fs, nperseg=len(sig), noverlap=2)
-    
-    # Identify the dominant frequency within the respiratory range (0.1 to 0.5 Hz)
+
+    # Select respiratory frequency range
     resp_range = (freqs >= 0.1) & (freqs <= 0.5)
-    resp_psd = psd[resp_range]
-    resp_freqs = freqs[resp_range]
-    
-    if len(resp_freqs) == 0:
+    resp_psd, resp_freqs = psd[resp_range], freqs[resp_range]
+
+    if resp_freqs.size == 0:
         return 0  # No valid respiratory frequency found
-    
+
     dominant_freq = resp_freqs[np.argmax(resp_psd)]
-    
-    # Convert the frequency to respiratory rate in breaths per minute
-    rr_bpm = np.abs(dominant_freq) * 60
-    
-    return rr_bpm
+    return np.abs(dominant_freq) * 60  # Convert to breaths per minute
 
 def estimate_rr_stft(sig, fs):
-    
-    # Compute STFT
+    """Estimate respiratory rate using Short-Time Fourier Transform (STFT).
+
+    Parameters
+    ----------
+    sig : array-like
+        Input signal.
+    fs : int
+        Sampling frequency.
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute.
+    """
     f, t, Zxx = stft(sig, fs, nperseg=len(sig), noverlap=2)
-    
-    # Calculate the power spectral density
-    psd = np.abs(Zxx)**2
-    
-    # Identify the dominant frequency within the respiratory range (0.1 to 0.5 Hz)
+    psd = np.abs(Zxx) ** 2
+
+    # Select respiratory frequency range
     resp_range = (f >= 0.1) & (f <= 0.5)
-    resp_psd = psd[resp_range, :]
-    resp_freqs = f[resp_range]
-    
-    if len(resp_freqs) == 0:
+    resp_psd, resp_freqs = psd[resp_range, :], f[resp_range]
+
+    if resp_freqs.size == 0:
         return 0  # No valid respiratory frequency found
-    
-    # Find the dominant frequency for each time segment and calculate the average
+
+    # Find dominant frequency in each time segment and average them
     dominant_freqs = resp_freqs[np.argmax(resp_psd, axis=0)]
     avg_dominant_freq = np.mean(dominant_freqs)
-    
-    # Convert the frequency to respiratory rate in breaths per minute
-    rr_bpm = np.abs(avg_dominant_freq) * 60
-    
-    return rr_bpm
-
-# def estimate_rr_wavelet(sig, fs, preprocess=True, signal_type='ECG'):
-#     if preprocess:
-#         sig = preprocess_signal(sig, fs, signal_type)
-    
-#     # Compute Wavelet Transform
-#     scales = np.arange(1, len(sig) // 2)
-#     coef, freqs = pywt.cwt(sig, scales, 'cmor', sampling_period=1/fs)
-    
-#     # Calculate the power spectral density
-#     psd = np.abs(coef)**2
-    
-#     # Identify the dominant frequency within the respiratory range (0.1 to 0.5 Hz)
-#     resp_range = (freqs >= 0.1) & (freqs <= 0.5)
-#     resp_psd = psd[resp_range, :]
-#     resp_freqs = freqs[resp_range]
-    
-#     if len(resp_freqs) == 0:
-#         return 0  # No valid respiratory frequency found
-    
-#     # Find the dominant frequency for each scale and calculate the average
-#     dominant_freqs = resp_freqs[np.argmax(resp_psd, axis=0)]
-#     avg_dominant_freq = np.mean(dominant_freqs)
-    
-#     # Convert the frequency to respiratory rate in breaths per minute
-#     rr_bpm = np.abs(avg_dominant_freq) * 60
-    
-#     return rr_bpm
-
-# def estimate_rr_wavelet(sig, fs):
-#     ti = len(sig)/fs
-    
-#     # Find the welch periodogram
-#     segment_length = min(1024, len(sig))  # np.power(2,downsample_fs)
-#     overlap = int(segment_length / 2)
-#     f, Pxx = signal.welch(sig, fs, nperseg=1024, noverlap=overlap)
-#     # print(Pxx)
-#     # fig = go.Figure()
-#     # fig.add_trace(go.Scatter(x=np.arange(len(sig)),y=sig,line=dict(color='blue')))
-#     # fig.add_trace(go.Scatter(x=f, y=Pxx, line=dict(color='crimson')))
-#     # fig.show()
-#     valid_peaks = find_spectral_peak(spectral_power=Pxx, frequency=f)
-#     # print(f)
-#     return len(valid_peaks)*60/ti
-
-# def find_spectral_peak(spectral_power, frequency):
-#     # cand_els = []
-#     # fig = go.Figure()
-#     # fig.add_trace(go.Scatter(x=np.arange(len(spectral_power)), y=spectral_power, line=dict(color='crimson')))
-#     # fig.show()
-
-#     spectral_peaks = scipy.signal.argrelmax(spectral_power, order=1)[0]
-#     # power_dev = spectral_power - np.min(spectral_power)
-
-#     valid_signal = np.where((frequency[spectral_peaks] > 0) & (frequency[spectral_peaks] < 2))
-#     return frequency[spectral_peaks[valid_signal]]
+    return np.abs(avg_dominant_freq) * 60  # Convert to breaths per minute
 
 def get_rr(sig, fs, preprocess=True, signal_type='ECG'):
+    """Estimate respiratory rate by combining results from FFT, STFT, and Welch methods.
+
+    Parameters
+    ----------
+    sig : array-like
+        Input signal.
+    fs : int
+        Sampling frequency.
+    preprocess : bool, default=True
+        Whether to preprocess the signal.
+    signal_type : str, default='ECG'
+        Type of signal (ECG or PPG).
+
+    Returns
+    -------
+    float
+        Combined estimated respiratory rate in breaths per minute.
+    """
     if preprocess:
         sig = preprocess_signal(sig, fs, signal_type)
-    
+
     rr_fft = estimate_rr_fft(sig, fs)
     rr_stft = estimate_rr_stft(sig, fs)
-    # rr_wavelet = estimate_rr_wavelet(sig, fs)
     rr_welch = estimate_rr_welch(sig, fs)
-    rr_bpm = np.mean([rr_fft, rr_stft, rr_welch])
-    
-    return rr_bpm
-
+    return np.mean([rr_fft, rr_stft, rr_welch])  # Combined average rate
 
 # if __name__ == "__main__":
 

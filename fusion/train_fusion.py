@@ -13,6 +13,7 @@ from sklearn.ensemble import RandomForestRegressor,GradientBoostingRegressor,\
     BaggingRegressor, AdaBoostRegressor
 from sklearn.metrics import mean_absolute_error
 from sklearn.ensemble import StackingRegressor
+import joblib
 import xgboost as xgb
 
 # Define file paths for the uploaded estimation methods
@@ -105,8 +106,8 @@ if __name__ == "__main__":
     
     print(f"Training MAE: {train_mae}")
     print(f"Test MAE: {test_mae}")
-    # print(np.round(y_pred_test[:200]))
-    # print(np.round(y_test.reshape(-1)[:200]))
+    print(np.round(y_pred_test[:200]))
+    print(np.round(y_test.reshape(-1)[:200]))
     
     # Define and train a stacking model
     base_learners = [
@@ -125,9 +126,11 @@ if __name__ == "__main__":
     test_mae_stacking = mean_absolute_error(y_test, y_pred_test_stacking)
 
     print(f"Stacking - Training MAE: {train_mae_stacking}, Test MAE: {test_mae_stacking}")
-    print(np.round(y_pred_test_stacking[:200]))
-    print(np.round(y_test.reshape(-1)[:200]))
-    
+    # print(np.round(y_pred_test_stacking[:200]))
+    # print(np.round(y_test.reshape(-1)[:200]))
+    for pred, test in zip(np.round(y_pred_test[:200]), 
+                          np.round(y_test.reshape(-1)[:200])):
+        print((pred, test),end=' ')
     # # Apply the estimate_rr_peaks function to each segment
     # estimated_rr = []
     # for index, row in ecg_data.iterrows():

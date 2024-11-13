@@ -1,56 +1,93 @@
-import plotly.graph_objects as go
-import numpy as np
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
-import pywt
-import pandas as pd
-import sys
-sys.path.append(".")
 from preprocess.preprocess import preprocess_signal
 
-
 def remove_heartbeat_trend(signal, fs):
-    # Apply a low-pass filter to remove high-frequency components (heartbeat)
+    """Remove high-frequency components (e.g., heartbeat) from a signal to isolate respiratory trend.
+
+    Parameters
+    ----------
+    signal : array-like
+        Input signal.
+    fs : int
+        Sampling frequency of the signal.
+
+    Returns
+    -------
+    array-like
+        Signal with high-frequency components removed.
+    """
     b, a = butter(3, 0.5 / (0.5 * fs), btype='low')
-    respiratory_signal = filtfilt(b, a, signal)
-    return respiratory_signal
+    return filtfilt(b, a, signal)
 
 def detect_respiratory_peaks(signal, fs):
-    # Remove heartbeat trend to isolate respiratory signal
+    """Detect peaks in a respiratory signal to identify respiratory cycles.
+
+    Parameters
+    ----------
+    signal : array-like
+        Input signal from which respiratory peaks will be detected.
+    fs : int
+        Sampling frequency of the signal.
+
+    Returns
+    -------
+    array-like
+        Indices of detected respiratory peaks in the signal.
+    """
     respiratory_signal = remove_heartbeat_trend(signal, fs)
-    
-    # Find peaks in the respiratory signal
-    distance = int(1.5 * fs)  # Assuming a minimum respiratory rate of 40 breaths per minute
-    peaks, _ = find_peaks(respiratory_signal, distance=distance, 
-                          height=np.mean(respiratory_signal) - np.std(respiratory_signal))
-    # peaks, _ = find_peaks(respiratory_signal, distance=distance, height=np.mean(respiratory_signal) + 0.5 * np.std(respiratory_signal))
-    
+    min_distance = int(1.5 * fs)  # Minimum distance between peaks (40 breaths per minute max)
+    threshold = np.mean(respiratory_signal) - np.std(respiratory_signal)
+
+    peaks, _ = find_peaks(respiratory_signal, distance=min_distance, height=threshold)
     return peaks
 
+def calculate_respiratory_rate(peaks, duration):
+    """Calculate respiratory rate in breaths per minute based on detected peaks.
 
-def calculate_respiratory_rate(peaks, fs, duration):
+    Parameters
+    ----------
+    peaks : array-like
+        Indices of detected peaks in the signal.
+    duration : float
+        Duration of the signal in seconds.
+
+    Returns
+    -------
+    float
+        Respiratory rate in breaths per minute.
+    """
     if len(peaks) < 2:
         return 0  # Not enough peaks to calculate a respiratory rate
-    # Calculate the respiratory rate in breaths per minute
+
     rr_bpm = (len(peaks) - 1) * 60 / duration
     return rr_bpm
 
-
-
 def get_rr(signal, fs, preprocess=True, signal_type='ECG'):
+    """Estimate respiratory rate from a signal.
+
+    Parameters
+    ----------
+    signal : array-like
+        Input signal for respiratory rate estimation.
+    fs : int
+        Sampling frequency of the signal.
+    preprocess : bool, default=True
+        Whether to preprocess the signal to remove noise and artifacts.
+    signal_type : str, default='ECG'
+        Type of signal ('ECG' or 'PPG').
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute.
+    """
     if preprocess:
-        signal = preprocess_signal(signal, fs,signal_type=signal_type)
-    
-    # Detect peaks corresponding to the respiratory cycles
+        signal = preprocess_signal(signal, fs, signal_type=signal_type)
+
     respiratory_peaks = detect_respiratory_peaks(signal, fs)
-    
-    # Calculate the duration of the signal in seconds
     duration = len(signal) / fs
-    
-    # Calculate the respiratory rate from the detected peaks
-    rr_bpm = calculate_respiratory_rate(respiratory_peaks, fs, duration)
-    
-    return rr_bpm
+    return calculate_respiratory_rate(respiratory_peaks, duration)
 
 # if __name__ == "__main__":
 #     calculated_fs = 256

@@ -1,42 +1,84 @@
 import numpy as np
-import pandas as pd
-from scipy import signal
-import sys
-sys.path.append(".")
 from preprocess.preprocess import preprocess_signal
 
-def calculate_respiratory_rate_from_zero_crossings(zero_crossings, fs, duration):
+def calculate_respiratory_rate_from_zero_crossings(zero_crossings, duration):
+    """Calculate respiratory rate from zero-crossings in the signal.
+
+    Parameters
+    ----------
+    zero_crossings : array-like
+        Indices of zero-crossings in the signal.
+    duration : float
+        Duration of the signal in seconds.
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute. Returns 0 if not enough zero-crossings.
+    """
     if len(zero_crossings) < 2:
-        return 0  # Not enough zero-crossings to calculate a respiratory rate
-    # Calculate the respiratory rate in breaths per minute
-    rr_bpm = (len(zero_crossings) - 1) * 60 / duration
-    return rr_bpm
+        return 0  # Insufficient zero-crossings for respiratory rate calculation
+    return (len(zero_crossings) - 1) * 60 / duration  # Breaths per minute
 
 def detect_zero_crossings(sig):
-    zero_crossings = np.where(np.diff(np.sign(sig)))[0]
-    return zero_crossings
+    """Detect zero-crossings in the signal.
 
+    Parameters
+    ----------
+    sig : array-like
+        Input signal.
 
-def get_rr(sig, fs, signal_type='ECG',preprocess=True):
+    Returns
+    -------
+    array-like
+        Indices of zero-crossings in the signal.
+    """
+    return np.where(np.diff(np.sign(sig)))[0]
+
+def get_rr(sig, fs, signal_type='ECG', preprocess=True):
+    """Estimate respiratory rate based on zero-crossings in the signal.
+
+    Parameters
+    ----------
+    sig : array-like
+        Input signal.
+    fs : int
+        Sampling frequency of the signal.
+    signal_type : str, default='ECG'
+        Type of signal ('ECG' or 'PPG').
+    preprocess : bool, default=True
+        Whether to preprocess the signal.
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute.
+    """
     if preprocess:
         sig = preprocess_signal(sig, fs, signal_type)
-    
-    # Detect zero-crossings corresponding to the respiratory cycles
+
     zero_crossings = detect_zero_crossings(sig)
-    
-    # Calculate the duration of the signal in seconds
     duration = len(sig) / fs
-    
-    # Calculate the respiratory rate from the detected zero-crossings
-    rr_bpm = calculate_respiratory_rate_from_zero_crossings(zero_crossings, fs, duration)
-    
-    return rr_bpm
+    return calculate_respiratory_rate_from_zero_crossings(zero_crossings, duration)
 
+def get_sign(index, trough_indices, peak_indices):
+    """Determine the sign of an extremum point (trough or peak) in the signal.
 
-def get_sign(extrema_indices, trough_indices, peak_indices):
-    if extrema_indices in trough_indices:
-        return -1
-    return 1
+    Parameters
+    ----------
+    index : int
+        Index of the extremum point.
+    trough_indices : array-like
+        Indices of troughs in the signal.
+    peak_indices : array-like
+        Indices of peaks in the signal.
+
+    Returns
+    -------
+    int
+        -1 if the index corresponds to a trough, 1 if it corresponds to a peak.
+    """
+    return -1 if index in trough_indices else 1
 
 # if __name__ == "__main__":
 

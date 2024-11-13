@@ -1,98 +1,109 @@
-import pandas as pd
 import numpy as np
-from scipy.signal import butter, filtfilt, argrelmax, find_peaks, welch
+from scipy.signal import stft, get_window
 from statsmodels.tsa.ar_model import AutoReg
-from scipy.signal.windows import get_window
-import pywt
-import scipy
-from scipy.signal import stft
-import sys
-sys.path.append('.')
 from preprocess.preprocess import preprocess_signal
 
-def estimate_rr_arp_1(signal, fs, preprocess=True, signal_type='ECG'):
-    
-    # Fit an AR model to the signal
-    model = AutoReg(signal, lags=2, old_names=False)
-    model_fit = model.fit()
-    
-    # Get the AR coefficients
-    ar_params = model_fit.params
-    
-    # Calculate the poles of the AR process
+def estimate_rr_arp_1(signal, fs):
+    """Estimate respiratory rate using an autoregressive (AR) model with pole frequency analysis.
+
+    Parameters
+    ----------
+    signal : array-like
+        Input signal.
+    fs : int
+        Sampling frequency of the signal.
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute, or 0 if no valid frequency is found.
+    """
+    # Fit an AR model and get coefficients
+    model = AutoReg(signal, lags=2, old_names=False).fit()
+    ar_params = model.params
+
+    # Calculate pole frequencies from AR coefficients
     poles = np.roots(np.concatenate(([1], -ar_params[1:])))
-    
-    # Calculate the frequencies of the poles
     angles = np.angle(poles)
     frequencies_hz = angles * fs / (2 * np.pi)
-    
-    # Find the dominant frequency within the respiratory range (0.1 to 0.5 Hz)
-    resp_range = (frequencies_hz >= 0.1) & (frequencies_hz <= 0.5)
-    resp_frequencies = frequencies_hz[resp_range]
-    if len(resp_frequencies) == 0:
+
+    # Filter frequencies within the respiratory range (0.1 to 0.5 Hz)
+    resp_frequencies = frequencies_hz[(0.1 <= frequencies_hz) & (frequencies_hz <= 0.5)]
+    if resp_frequencies.size == 0:
         return 0  # No valid respiratory frequency found
-    
+
+    # Dominant frequency in breaths per minute
     dominant_frequency = resp_frequencies[np.argmax(np.abs(resp_frequencies))]
-    
-    # Convert the dominant frequency to respiratory rate in breaths per minute
-    rr_bpm = np.abs(dominant_frequency) * 60
-    
-    return rr_bpm
+    return np.abs(dominant_frequency) * 60
 
+def estimate_rr_arp_2(signal, fs, window_type='hann', lower_bound=0.12, upper_bound=0.6):
+    """Estimate respiratory rate using Short-Time Fourier Transform (STFT) and spectral analysis.
 
-def estimate_rr_arp_2(sig, fs,
-                    window_type='hann', nperseg=1028, noverlap=128,
-                    preprocess=True, use_wavelet=True,
-                    lower_bound = 0.12,  # Corresponds to about 6 breaths per minute
-                    upper_bound = 0.6  # Corresponds to about  breaths per minute
-                    ):
-    
-    nperseg = fs*25
-    noverlap = int(fs/4)
+    Parameters
+    ----------
+    signal : array-like
+        Input signal.
+    fs : int
+        Sampling frequency of the signal.
+    window_type : str, default='hann'
+        Type of window to apply for STFT.
+    lower_bound : float, default=0.12
+        Lower frequency bound for respiratory range in Hz (approx. 7 bpm).
+    upper_bound : float, default=0.6
+        Upper frequency bound for respiratory range in Hz (approx. 36 bpm).
+
+    Returns
+    -------
+    float
+        Estimated respiratory rate in breaths per minute, or 10 if no valid peak is found.
+    """
+    nperseg = fs * 25  # Window size for spectral analysis
+    noverlap = int(fs / 4)  # Overlap between segments
     window = get_window(window_type, nperseg)
-    # Compute STFT
-    f, t, Zxx = stft(sig, fs, window=window, nperseg=nperseg, noverlap=noverlap)
-    
+
+    # Compute STFT and power spectrum
+    f, _, Zxx = stft(signal, fs, window=window, nperseg=nperseg, noverlap=noverlap)
+    power_spectrum = np.abs(Zxx) ** 2
     resp_band = (f >= lower_bound) & (f <= upper_bound)
-    
-    # Sum the power in the respiratory band over time
-    power_spectrum = np.abs(Zxx)**2
+
+    # Aggregate power in the respiratory band
     resp_power = power_spectrum[resp_band, :].sum(axis=0)
-    
-    # Check if there are valid peaks
+
     if resp_power.size > 0 and resp_band.any():
-        # Identify the peak in the aggregated power spectrum
-        
         peak_idx = np.argmax(resp_power)
         peak_freqs = f[resp_band]
         peak_freq = peak_freqs[np.argmax(power_spectrum[resp_band, peak_idx])]
-        rr_bpm = peak_freq * 60
-        
-        # peak_indices = np.argpartition(resp_power, -3)[-3:]
-        # peak_indices = peak_indices[np.argsort(-resp_power[peak_indices])]  # Sort indices by power values
-        # peak_freqs = f[resp_band][peak_indices]
-        
-        # Calculate the mean of the top 3 peak frequencies
-        # mean_peak_freq = np.median(peak_freqs)
-        
-        # Convert frequency to BPM
-        # rr_bpm = mean_peak_freq * 60
-        
+        rr_bpm = peak_freq * 60  # Convert frequency to bpm
     else:
-        rr_bpm = 10  # Default to 0 if no valid peak is found
-    
+        rr_bpm = 10  # Default to 10 if no valid peak is found
+
     return rr_bpm
 
-def get_rr(sig, fs, signal_type='ECG',preprocess=True, use_wavelet=True):
+def get_rr(signal, fs, signal_type='ECG', preprocess=True):
+    """Estimate respiratory rate by combining results from multiple autoregressive models.
+
+    Parameters
+    ----------
+    signal : array-like
+        Input signal.
+    fs : int
+        Sampling frequency of the signal.
+    signal_type : str, default='ECG'
+        Type of signal ('ECG' or 'PPG').
+    preprocess : bool, default=True
+        Whether to preprocess the signal before estimating respiratory rate.
+
+    Returns
+    -------
+    float
+        Combined estimated respiratory rate in breaths per minute.
+    """
     if preprocess:
-        sig = preprocess_signal(sig,fs,signal_type)
-    
-    # Directly find respiratory peaks in the filtered signal
-    rr_bpm_1 = estimate_rr_arp_1(sig, fs)
-    rr_bpm_2 = estimate_rr_arp_1(sig, fs)
-    rr_bpm_combined = (rr_bpm_1 + rr_bpm_2) / 2
-    
-    return rr_bpm_combined
+        signal = preprocess_signal(signal, fs, signal_type)
+
+    rr_bpm_1 = estimate_rr_arp_1(signal, fs)
+    rr_bpm_2 = estimate_rr_arp_2(signal, fs)
+    return (rr_bpm_1 + rr_bpm_2) / 2  # Average estimate
 
 # if __name__ == "__main__":
 
