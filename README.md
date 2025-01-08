@@ -1,6 +1,8 @@
 
 # Respiratory-Rate-PPG-ECG Repository
 
+[![DOI](https://zenodo.org/badge/659031505.svg)](https://doi.org/10.5281/zenodo.14613763)
+
 The **Respiratory-Rate-PPG-ECG** repository offers methods to estimate respiratory rate using signals from wearable devices, specifically Electrocardiogram (ECG) and Photoplethysmogram (PPG). It includes both signal processing techniques and deep learning models to predict respiratory rates.
 
 ## Features
