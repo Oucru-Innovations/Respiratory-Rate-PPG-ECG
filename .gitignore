@@ -72,3 +72,30 @@ dmypy.json
 
 # Ignore miscellaneous files
 *.~undo-tree~
+.qodo
+
+# Ignore dataset files
+dataset/
+*.csv
+# *.json
+*.pth
+*.pt
+*.pkl
+*.pickle
+*.pickle
+
+# Ignore mlflow files
+mlruns/
+*.mlflow
+*.mlflow.*
+*.mlflow.json
+*.mlflow.json.*
+*.mlflow.json.*
+
+# Ignore legacy files
+legacy/
+*.csv
+# *.json
+*.pth
+*.pt
+*.pkl
