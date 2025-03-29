@@ -5,7 +5,6 @@ import math
 import torch
 import torch.nn as nn
 import numpy as np
-import pywt
 
 import torch
 import torch.nn as nn
@@ -173,34 +172,6 @@ class WaveletLayerDL(nn.Module):
         phi_out = x.mean(dim=1, keepdim=True)
         return phi_out
 
-class WaveletTransform(nn.Module):
-    def __init__(self, wavelet_name='haar', mode='symmetric', level=1):
-        super(WaveletTransform, self).__init__()
-        self.wavelet_name = wavelet_name
-        self.mode = mode
-        self.level = level
-        
-        # Define the wavelet filter bank
-        self.filters = torch.Tensor(pywt.Wavelet(self.wavelet_name).filter_bank[0])
-
-    def forward(self, x):
-        batch_size, num_channels, height, width = x.size()
-        
-        # Reshape the input tensor into a matrix
-        matrix = x.view(batch_size * num_channels, 1, height, width)
-        
-        # Perform horizontal and vertical convolutions using the wavelet filter bank
-        low_freqs = F.conv2d(matrix, self.filters[:, None], padding=(0, 1), groups=num_channels)
-        high_freqs = F.conv2d(matrix, self.filters[:, None], padding=(0, 1), groups=num_channels)[:, :, :, 1:]
-        
-        # Extract the approximation and detail coefficients
-        approx = F.avg_pool2d(low_freqs, kernel_size=2)
-        detail = high_freqs.transpose(2, 3)
-        
-        # Reshape the coefficients into a tensor and concatenate them along the channel dimension
-        coeffs = torch.cat([approx.view(batch_size, num_channels, -1), detail.view(batch_size, num_channels, -1)], dim=-1)
-        
-        return coeffs
     
 
 class PrimaryCapsules(nn.Module):

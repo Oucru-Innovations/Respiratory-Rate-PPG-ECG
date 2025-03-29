@@ -3,20 +3,109 @@ import torch.nn as nn
 from efficientnet_pytorch import EfficientNet
 import torch.nn.functional as F
 import numpy as np
-import pywt
-from layer_pool import DigitCapsules, CapsuleLayer, WaveletTransform, CapsuleNetwork, WaveletLayer
+from layer_pool import DigitCapsules, CapsuleLayer, CapsuleNetwork, WaveletLayer
 import biosppy.signals.ecg as ecg
 from scipy import signal
 import plotly.graph_objs as go
 import matplotlib.pyplot as plt
 import seaborn as sns
+from vit_pytorch import ViT  # Import ViT from lucidrains/vit-pytorch
+
 # import sys
 # import os
 # sys.path.append("..")
 # import estimate_rr.CtA as CtA
 #=====================================================================
-#               Modify Models -Classification Task
+#               Modify Models - Classification Task
 #=====================================================================
+
+class SimpleTransformerRegressor(nn.Module):
+    def __init__(self, input_dim=224*224, embed_dim=128, num_heads=4, num_layers=2):
+        super(SimpleTransformerRegressor, self).__init__()
+        self.embedding = nn.Linear(input_dim, embed_dim)
+        transformer_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=num_heads, dim_feedforward=embed_dim*2
+        )
+        self.transformer_encoder = nn.TransformerEncoder(transformer_layer, num_layers=num_layers)
+        self.regressor_head = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+
+    def forward(self, x):
+        _, spectrogram = x
+        x_flat = spectrogram.view(spectrogram.size(0), -1)
+        embedded = self.embedding(x_flat).unsqueeze(0)
+        transformer_output = self.transformer_encoder(embedded).squeeze(0)
+        output = self.regressor_head(transformer_output)
+        return output
+
+class ViTRegressor(nn.Module):
+    def __init__(self, fs=100,image_size=224, patch_size=16, channels=3, dim=128, depth=4, heads=4, mlp_dim=256):
+        super(ViTRegressor, self).__init__()
+        self.vit = ViT(
+            image_size=image_size,
+            patch_size=patch_size,
+            num_classes=1,
+            dim=dim,
+            depth=depth,
+            heads=heads,
+            mlp_dim=mlp_dim,
+            channels=channels,
+            dropout=0.1,
+            emb_dropout=0.1
+        )
+        self.fs = fs
+
+    def forward(self, x):
+        _, spectrogram = x
+        output = self.vit(spectrogram)
+        return output
+
+# New Transformer-based Models
+class ViTRespiratoryRateModel(nn.Module):
+    def __init__(self, num_classes=64, fs=128):
+        super(ViTRespiratoryRateModel, self).__init__()
+        self.fs = fs
+        self.vit = ViT(
+            image_size=224,
+            patch_size=32,
+            num_classes=num_classes,
+            dim=1024,
+            depth=6,
+            heads=16,
+            mlp_dim=2048,
+            dropout=0.1,
+            emb_dropout=0.1
+        )
+
+    def forward(self, x):
+        # x is a tuple (original_signal, spectrogram)
+        spectrogram = x[1]  # Use the spectrogram input
+        return self.vit(spectrogram)
+
+class SimpleViTRespiratoryRateModel(nn.Module):
+    def __init__(self, num_classes=64, fs=128):
+        super(SimpleViTRespiratoryRateModel, self).__init__()
+        self.fs = fs
+        self.vit = ViT(
+            image_size=224,
+            patch_size=16,
+            num_classes=num_classes,
+            dim=256,
+            depth=4,
+            heads=4,
+            mlp_dim=512,
+            dropout=0.1,
+            emb_dropout=0.1
+        )
+
+    def forward(self, x):
+        # x is a tuple (original_signal, spectrogram)
+        spectrogram = x[1]  # Use the spectrogram input
+        return self.vit(spectrogram)
 
 
 class RRConvCapsNet(nn.Module):
@@ -153,72 +242,6 @@ class RREfficientNetCapsule(nn.Module):
         return output
 
 # Define the model architecture
-class RRClassifier(nn.Module):
-    def __init__(self):
-        super(RRClassifier, self).__init__()
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1)
-        nn.init.kaiming_normal_(self.conv1.weight, mode='fan_out', nonlinearity='relu')
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
-        nn.init.kaiming_normal_(self.conv2.weight, mode='fan_out', nonlinearity='relu')
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1)
-        nn.init.kaiming_normal_(self.conv3.weight, mode='fan_out', nonlinearity='relu')
-        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.fc1 = nn.Linear(256 * 28 * 28, 512)
-        nn.init.kaiming_normal_(self.fc1.weight, mode='fan_out', nonlinearity='relu')
-        self.dropout = nn.Dropout(p=0.2)
-        self.fc2 = nn.Linear(512, 64)
-        nn.init.kaiming_normal_(self.fc2.weight, mode='fan_out', nonlinearity='linear')
-
-        self.mean = torch.tensor([0.5, 0.5, 0.5])
-        self.std = torch.tensor([0.5, 0.5, 0.5])
-
-    def wavelet_scan(self,x):
-        # assume ecg_data is a PyTorch tensor containing the ECG signal
-        # sample_rate is the sampling rate of the ECG signal
-        wavelet_name = 'db4'  # select a wavelet type
-        level = 6  # select the level of decomposition
-
-        # convert the PyTorch tensor to a numpy array
-        ecg_data_np = x.cpu().numpy()
-
-        # create an empty list to store the padded wavelet coefficients for each batch
-        coeffs_all = []
-
-        # loop over each batch in the input tensor
-        for batch in ecg_data_np:
-            # perform wavelet decomposition on the current batch
-            coeffs = pywt.wavedec(batch, wavelet_name, level=level)
-            
-            # pad the wavelet coefficients with zeros along the last dimension
-            max_len = max([c.shape[-1] for c in coeffs])
-            coeffs_padded = [np.pad(c, ((0, 0), (0, 0), (0, max_len - c.shape[-1])), mode='constant') for c in coeffs]
-            
-            # convert the padded wavelet coefficients to PyTorch tensors and append to the list
-            coeffs_tensors = [torch.from_numpy(c) for c in coeffs_padded]
-            coeffs_all.append(coeffs_tensors)
-
-        # convert the list of coefficient lists to a nested PyTorch tensor
-        coeffs_tensor = torch.stack([torch.stack(coeffs) for coeffs in coeffs_all])
-    
-    def forward(self, x):
-        # Normalize input
-        x = (x - self.mean.to(x.device)[None, :, None, None]) / \
-            self.std.to(x.device)[None, :, None, None]
-
-        x = nn.functional.relu(self.conv1(x))
-        x = self.pool1(x)
-        x = nn.functional.relu(self.conv2(x))
-        x = self.pool2(x)
-        x = nn.functional.relu(self.conv3(x))
-        x = self.pool3(x)
-        x = torch.flatten(x, start_dim=1)
-        x = nn.functional.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = self.fc2(x)
-        return x
-
 class WaveletCapsuleNetwork(nn.Module):
     def __init__(self, num_classes=10, wavelet_name='haar', mode='symmetric', level=1):
         super(WaveletCapsuleNetwork, self).__init__()
@@ -235,7 +258,7 @@ class WaveletCapsuleNetwork(nn.Module):
         x = self.capsule_network(x)
         
         return x
-  
+
 # Add Wavelet transformation Layer
 class RRWaveletClassifier(nn.Module):
     def __init__(self, input_shape, num_classes, 
@@ -360,167 +383,6 @@ class RRClassifierUNet(nn.Module):
 
         return x
 
-class RREfficientNetClassifier(nn.Module):
-    def __init__(self,num_classes,fs, *args, **kwargs) -> None:
-        super(RREfficientNetClassifier, self).__init__(*args, **kwargs)
-        self.fs = fs
-        self.base_model = EfficientNet.from_pretrained('efficientnet-b0')
-        # Freeze the weights of the base model
-        for param in self.base_model.parameters():
-            param.requires_grad = True
-               
-        self.num_feats = self.base_model._fc.in_features + 1 + 50
-        self.fc1 = nn.Linear(self.num_feats, 256)
-        self.dropout = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(256, num_classes)
-    
-    def compute_RR(self,x):
-        # x=x[0]
-        # convert the PyTorch tensor to a numpy array
-        # ecg_data_np = x.cpu().numpy()
-        rr_list = []
-        # loop over each batch in the input tensor
-        for batch in x:
-            # # convert back to signal from tensor
-            # ecg_signal = torch.istft(batch, n_fft=self.nfft, hop_length=hop_length)
-            try:
-                # filter signal
-                ecg_signal = batch.cpu().numpy().reshape(-1)
-                ecg_signal = signal.detrend(ecg_signal) # remove baseline
-                b,a = signal.butter(2,[0.1, 4], btype="bandpass",fs=self.fs)
-                ecg_signal = signal.filtfilt(b,a,ecg_signal)
-                
-                #compute RR
-                # rpeaks,_ = ecg.hamilton_segmenter(ecg_signal,self.fs)
-                rpeaks = (signal.find_peaks(ecg_signal)[0])
-                rr_intervals = np.diff(rpeaks)
-                
-                #Calculate PSD
-                f, psd = signal.welch(rr_intervals, fs=self.fs, nperseg= 1024)
-                f = f/self.fs
-                #Identify RR frequency component
-                resp_freq_range = (0.1,0.8)
-                resp_freq_mask = np.logical_and(f >= resp_freq_range[0], f <= resp_freq_range[1])
-                max_resp_freq_idx = np.argmax(psd[resp_freq_mask]) 
-                resp_rate = f[resp_freq_mask][max_resp_freq_idx] * 60
-            except Exception as err:
-                resp_rate = 20
-            
-            rr_list.append(resp_rate)
-        
-        return torch.tensor(rr_list).unsqueeze(1).to(x.device)  # Return as tensor and unsqueeze to match shape of ECG data
-
-   
-    def wavelet_scan(self,x):  
-        # x = x[1]      
-        # assume ecg_data is a PyTorch tensor containing the ECG signal
-        # sample_rate is the sampling rate of the ECG signal
-        wavelet_name = 'db4'  # select a wavelet type
-        level = 4  # select the level of decomposition
-
-        # convert the PyTorch tensor to a numpy array
-        ecg_data_np = x.cpu().numpy()
-
-        # create an empty list to store the padded wavelet coefficients for each batch
-        coeffs_all = []
-
-        # loop over each batch in the input tensor
-        for batch in ecg_data_np:
-            # perform wavelet decomposition on the current batch
-            coeffs = pywt.wavedec(batch, wavelet_name, level=level)
-            
-            # pad the wavelet coefficients with zeros along the last dimension
-            # max_len = max([c.shape[-1] for c in coeffs])
-            # coeffs_padded = [np.pad(c, ((0, 0), (0, 0), (0, max_len - c.shape[-1])), mode='constant') 
-            #                  for c in coeffs]
-            coeffs_padded = coeffs
-            
-            # convert the padded wavelet coefficients to PyTorch tensors and append to the list
-            coeffs_tensors = [torch.from_numpy(c) for c in coeffs_padded[:]]
-            coeffs_all.append(coeffs_tensors)
-
-        # convert the list of coefficient lists to a nested PyTorch tensor
-        coeffs_tensor = torch.stack([torch.stack(coeffs[:2]) for coeffs in coeffs_all])
-        
-        
-        # Case wavelet on signal
-        batch_size, levels, channels, w = coeffs_tensor.shape
-        
-        level_1_coeffs = coeffs_tensor[:,0,:,:].clone()
-        level_1_coeffs = level_1_coeffs.view(batch_size,channels,w)
-        # return level_1_coeffs
-
-        ca_coeffs_tensor = coeffs_tensor[:,:,0,:].clone()
-        ca_coeffs_tensor = ca_coeffs_tensor.view(batch_size,levels*w)
-        
-        # ca_coeffs_tensor = ca_coeffs_tensor.unsqueeze(-1)  # Add dummy spatial dimension
-        # ca_coeffs_tensor = F.interpolate(ca_coeffs_tensor,size=(20,), mode='linear')
-        # ca_interpolated_tensor = torch.mean(ca_coeffs_tensor, dim=1)  # Reduce channels to 1
-        
-        # Shape is [batch_size, level of decomposition,number of coefficient arrays at each level of decomposition, height dimension of each spectrogram image,idth dimension of each spectrogram image]
-
-        # Decomposes the signal into multiple frequency bands (approximations and details) at different resolution levels.
-
-        # This dimension represents the number of coefficient arrays at each level of decomposition. Specifically, it corresponds to the approximation coefficients (cA) and the two detail coefficients (cD) for each level of decomposition. For example, at level 1 there are 3 coefficient arrays: cA1, cD1 (horizontal), and cD1 (vertical). The actual number of coefficient arrays may vary depending on the wavelet family used and the level of decomposition.
-        
-        # length of the wavelet coefficients at each level of decomposition..
-        # torch.nn.functional.normalize(ca_interpolated_tensor, dim=-1)
-        # Compute mean and standard deviation along data dimension
-        ca_interpolated_tensor = F.interpolate(ca_coeffs_tensor.unsqueeze(1), 
-                                               size=(50,), 
-                                               mode='linear').squeeze(1)
-        
-        normalized_tensor = torch.nn.functional.normalize(ca_interpolated_tensor, dim=-1)
-        return normalized_tensor.to(x.device) # shape is [batch_size,]
-    
-    def forward(self, x, heatmap_layer=None, layer_idx=None):
-        origin_x = x[0]
-        rr = self.compute_RR(origin_x)
-        # ca_interpolated_tensor = self.wavelet_scan(origin_x)
-        x = x[1]        
-        
-        features = self.base_model.extract_features(x)
-        if heatmap_layer is not None:
-            assert 0 <= heatmap_layer <= len(features) - 1, f"Heatmap layer should be between 0 and {len(features) - 1}"
-            heatmap = F.relu(features[heatmap_layer])
-            heatmap = F.adaptive_avg_pool2d(heatmap, 1)
-            heatmap = heatmap.squeeze()
-            # Reshape the heatmap tensor into a 2D image
-            # h, w = features.shape[-2:]
-            # heatmap = heatmap.reshape((32, 40))
-            heatmap = heatmap.detach().cpu().numpy()
-        else:
-            heatmap = None
-
-        if layer_idx is not None:
-            assert 0 <= layer_idx <= len(features) - 1, f"Layer index should be between 0 and {len(features) - 1}"
-            feature_map = features[layer_idx]
-            # Reshape feature map tensor to 2D image format
-            h, w = feature_map.shape[-2:]
-            h = 640
-            w = 98
-            feature_map = feature_map.detach().cpu().numpy().reshape(h, w)
-        else:
-            feature_map = None
-        
-        # rr = self.compute_CtA(x)
-        # ca_coeffs_tensor,cD_coeffs_tensor = self.wavelet_scan(origin_x)
-        # combine features
-        # x = self.base_model._avg_pooling(features)
-        # x = x.flatten(start_dim=1)
-        
-        x_features = self.base_model._avg_pooling(features)
-        x_features = x_features.flatten(start_dim=1)
-        x = torch.cat([x_features, rr.float()], dim=1)
-        x = self.fc1(x)
-        x = nn.functional.relu(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-        if (layer_idx is not None) or (heatmap_layer is not None):
-           
-            return x, feature_map, heatmap
-        return x
-
 class RREfficientNetGMClassifierPPG(nn.Module):
     def __init__(self,num_classes,fs,num_mixtures=5, *args, **kwargs) -> None:
         super(RREfficientNetGMClassifierPPG, self).__init__(*args, **kwargs)
@@ -603,209 +465,6 @@ class RREfficientNetGMClassifierPPG(nn.Module):
         x = self.fc2(x)
         
         if (layer_idx is not None) or (heatmap_layer is not None):
-            return x, feature_map, heatmap
-        return x
-
-class RREfficientNetClassifierPPG(nn.Module):
-    def __init__(self,num_classes,fs, *args, **kwargs) -> None:
-        super(RREfficientNetClassifierPPG, self).__init__(*args, **kwargs)
-        self.fs = fs
-        self.base_model = EfficientNet.from_pretrained('efficientnet-b0')
-        # Freeze the weights of the base model
-        for param in self.base_model.parameters():
-            param.requires_grad = True
-               
-        self.num_feats = self.base_model._fc.in_features + 1 + 50
-        self.fc1 = nn.Linear(self.num_feats, 256)
-        self.dropout = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(256, num_classes)
-    
-    def compute_RR(self,x):
-        # x=x[0]
-        # convert the PyTorch tensor to a numpy array
-        # ecg_data_np = x.cpu().numpy()
-        rr_list = []
-        # loop over each batch in the input tensor
-        for batch in x:
-            # # convert back to signal from tensor
-            # ecg_signal = torch.istft(batch, n_fft=self.nfft, hop_length=hop_length)
-            try:
-                # filter signal
-                ecg_signal = batch.cpu().numpy().reshape(-1)
-                ecg_signal = signal.detrend(ecg_signal) # remove baseline
-                b,a = signal.butter(2,[0.1, 4], btype="bandpass",fs=self.fs)
-                ecg_signal = signal.filtfilt(b,a,ecg_signal)
-                
-                #compute RR
-                # rpeaks,_ = ecg.hamilton_segmenter(ecg_signal,self.fs)
-                rpeaks = (signal.find_peaks(ecg_signal)[0])
-                rr_intervals = np.diff(rpeaks)
-                
-                #Calculate PSD
-                f, psd = signal.welch(rr_intervals, fs=self.fs, nperseg= 1024)
-                f = f/self.fs
-                #Identify RR frequency component
-                resp_freq_range = (0.1,0.8)
-                resp_freq_mask = np.logical_and(f >= resp_freq_range[0], f <= resp_freq_range[1])
-                max_resp_freq_idx = np.argmax(psd[resp_freq_mask]) 
-                resp_rate = f[resp_freq_mask][max_resp_freq_idx] * 60
-            except Exception as err:
-                resp_rate = 20
-            
-            rr_list.append(resp_rate)
-        
-        return torch.tensor(rr_list).unsqueeze(1).to(x.device)  # Return as tensor and unsqueeze to match shape of ECG data
-
-   
-    def wavelet_scan(self,x):  
-        # x = x[1]      
-        # assume ecg_data is a PyTorch tensor containing the ECG signal
-        # sample_rate is the sampling rate of the ECG signal
-        wavelet_name = 'db4'  # select a wavelet type
-        level = 4  # select the level of decomposition
-
-        # convert the PyTorch tensor to a numpy array
-        ecg_data_np = x.cpu().numpy()
-
-        # create an empty list to store the padded wavelet coefficients for each batch
-        coeffs_all = []
-
-        # loop over each batch in the input tensor
-        for batch in ecg_data_np:
-            # perform wavelet decomposition on the current batch
-            coeffs = pywt.wavedec(batch, wavelet_name, level=level)
-            
-            # pad the wavelet coefficients with zeros along the last dimension
-            # max_len = max([c.shape[-1] for c in coeffs])
-            # coeffs_padded = [np.pad(c, ((0, 0), (0, 0), (0, max_len - c.shape[-1])), mode='constant') 
-            #                  for c in coeffs]
-            coeffs_padded = coeffs
-            
-            # convert the padded wavelet coefficients to PyTorch tensors and append to the list
-            coeffs_tensors = [torch.from_numpy(c) for c in coeffs_padded[:]]
-            coeffs_all.append(coeffs_tensors)
-
-        # convert the list of coefficient lists to a nested PyTorch tensor
-        coeffs_tensor = torch.stack([torch.stack(coeffs[:2]) for coeffs in coeffs_all])
-        # coeffs_tensor
-        # Case wavelet on images
-        # batch_size, levels, channels, w,wavelength = coeffs_tensor.shape
-        
-        # level_1_coeffs = coeffs_tensor[:,0,:,:,:].clone()
-        # level_1_coeffs = level_1_coeffs.view(batch_size,channels,w,wavelength)
-        # # return level_1_coeffs
-
-        # ca_coeffs_tensor = coeffs_tensor[:,:,0,:,:].clone()
-        # ca_coeffs_tensor = ca_coeffs_tensor.view(batch_size,levels*w* wavelength)
-        
-        # cD_coeffs_tensor = coeffs_tensor[:,:,1,:,:].clone()
-        # cD_coeffs_tensor = cD_coeffs_tensor.view(batch_size,levels*w* wavelength)
-        
-        # ca_coeffs_tensor = ca_coeffs_tensor.unsqueeze(-1)  # Add dummy spatial dimension
-        # ca_coeffs_tensor = F.interpolate(ca_coeffs_tensor,size=(100,), mode='linear')
-        # ca_interpolated_tensor = torch.mean(ca_coeffs_tensor, dim=1)  # Reduce channels to 1
-        
-        # cD_coeffs_tensor = cD_coeffs_tensor.unsqueeze(-1)  # Add dummy spatial dimension
-        # cD_coeffs_tensor = F.interpolate(cD_coeffs_tensor,size=(100,), mode='linear')
-        # cD_interpolated_tensor = torch.mean(cD_coeffs_tensor, dim=1)  # Reduce channels to 1
-
-        
-        # # Shape is [batch_size, level of decomposition,number of coefficient arrays at each level of decomposition, height dimension of each spectrogram image,idth dimension of each spectrogram image]
-
-        # # Decomposes the signal into multiple frequency bands (approximations and details) at different resolution levels.
-
-        # # This dimension represents the number of coefficient arrays at each level of decomposition. Specifically, it corresponds to the approximation coefficients (cA) and the two detail coefficients (cD) for each level of decomposition. For example, at level 1 there are 3 coefficient arrays: cA1, cD1 (horizontal), and cD1 (vertical). The actual number of coefficient arrays may vary depending on the wavelet family used and the level of decomposition.
-        
-        # # length of the wavelet coefficients at each level of decomposition..
-
-        # return ca_interpolated_tensor,cD_interpolated_tensor # shape is [batch_size,]
-        
-        # Case wavelet on signal
-        batch_size, levels, channels, w = coeffs_tensor.shape
-        
-        level_1_coeffs = coeffs_tensor[:,0,:,:].clone()
-        level_1_coeffs = level_1_coeffs.view(batch_size,channels,w)
-        # return level_1_coeffs
-
-        ca_coeffs_tensor = coeffs_tensor[:,:,0,:].clone()
-        ca_coeffs_tensor = ca_coeffs_tensor.view(batch_size,levels*w)
-        
-        # ca_coeffs_tensor = ca_coeffs_tensor.unsqueeze(-1)  # Add dummy spatial dimension
-        # ca_coeffs_tensor = F.interpolate(ca_coeffs_tensor,size=(20,), mode='linear')
-        # ca_interpolated_tensor = torch.mean(ca_coeffs_tensor, dim=1)  # Reduce channels to 1
-        
-        # Shape is [batch_size, level of decomposition,number of coefficient arrays at each level of decomposition, height dimension of each spectrogram image,idth dimension of each spectrogram image]
-
-        # Decomposes the signal into multiple frequency bands (approximations and details) at different resolution levels.
-
-        # This dimension represents the number of coefficient arrays at each level of decomposition. Specifically, it corresponds to the approximation coefficients (cA) and the two detail coefficients (cD) for each level of decomposition. For example, at level 1 there are 3 coefficient arrays: cA1, cD1 (horizontal), and cD1 (vertical). The actual number of coefficient arrays may vary depending on the wavelet family used and the level of decomposition.
-        
-        # length of the wavelet coefficients at each level of decomposition..
-        # torch.nn.functional.normalize(ca_interpolated_tensor, dim=-1)
-        # Compute mean and standard deviation along data dimension
-        ca_interpolated_tensor = F.interpolate(ca_coeffs_tensor.unsqueeze(1), 
-                                               size=(50,), 
-                                               mode='linear').squeeze(1)
-        
-        normalized_tensor = torch.nn.functional.normalize(ca_interpolated_tensor, dim=-1)
-        return normalized_tensor.to(x.device) # shape is [batch_size,]
-    
-    def forward(self, x, heatmap_layer=None, layer_idx=None):
-        origin_x = x[0]
-        rr = self.compute_RR(origin_x)
-        # ca_interpolated_tensor = self.wavelet_scan(origin_x)
-        combine_data = x[0]
-        ca_interpolated_tensor = self.wavelet_scan(combine_data)
-        x = x[1]        
-        
-        
-        # for batch in combine_data:
-        #     batch = batch.cpu().numpy().reshape(-1)
-        #     fig = go.Figure()
-        #     # fig.add_trace(go.Scatter(x=np.arange(len(df_sc)),y=-(df_sc['PLETH']-33175)))
-        #     fig.add_trace(go.Scatter(x=np.arange(len(batch)),y=batch))
-        #     fig.show()
-        
-        
-        features = self.base_model.extract_features(x)
-        if heatmap_layer is not None:
-            assert 0 <= heatmap_layer <= len(features) - 1, f"Heatmap layer should be between 0 and {len(features) - 1}"
-            heatmap = F.relu(features[heatmap_layer])
-            heatmap = F.adaptive_avg_pool2d(heatmap, 1)
-            heatmap = heatmap.squeeze()
-            # Reshape the heatmap tensor into a 2D image
-            # h, w = features.shape[-2:]
-            # heatmap = heatmap.reshape((32, 40))
-            heatmap = heatmap.detach().cpu().numpy()
-        else:
-            heatmap = None
-
-        if layer_idx is not None:
-            assert 0 <= layer_idx <= len(features) - 1, f"Layer index should be between 0 and {len(features) - 1}"
-            feature_map = features[layer_idx]
-            # Reshape feature map tensor to 2D image format
-            h, w = feature_map.shape[-2:]
-            h = 640
-            w = 98
-            feature_map = feature_map.detach().cpu().numpy().reshape(h, w)
-        else:
-            feature_map = None
-        
-        # rr = self.compute_CtA(x)
-        # ca_coeffs_tensor,cD_coeffs_tensor = self.wavelet_scan(origin_x)
-        # combine features
-        # x = self.base_model._avg_pooling(features)
-        # x = x.flatten(start_dim=1)
-        
-        x_features = self.base_model._avg_pooling(features)
-        x_features = x_features.flatten(start_dim=1)
-        x = torch.cat([x_features, rr.float(), ca_interpolated_tensor.float()], dim=1)
-        x = self.fc1(x)
-        x = nn.functional.relu(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-        if (layer_idx is not None) or (heatmap_layer is not None):
-           
             return x, feature_map, heatmap
         return x
 

@@ -1,0 +1,14 @@
+{
+    "signal_type": "ecg",
+    "fs_ecg": 128,
+    "fs_ppg": 100,
+    "num_classes": 64,
+    "duration": 30,
+    "nperseg": 256,
+    "noverlap": 128,
+    "nfft": 2048,
+    "epochs": 50,
+    "batch_size": 256,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001
+}
