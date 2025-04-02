@@ -1,14 +1,22 @@
 {
-    "signal_type": "ecg",
+    "signal_type": "ppg",
+    "model_type": "vit_wave",
     "fs_ecg": 128,
     "fs_ppg": 100,
     "num_classes": 64,
     "duration": 30,
-    "nperseg": 256,
-    "noverlap": 128,
+    "nperseg": 1024,
+    "noverlap": 896,
     "nfft": 2048,
     "epochs": 50,
+    "loss_type": "mae",
+    "huber_delta": 1.0,
     "batch_size": 256,
-    "learning_rate": 0.001,
-    "weight_decay": 0.0001
+    "learning_rate": 5e-5,
+    "plot_samples": false,
+    "weight_decay": 0.0001,
+    "early_stopping": {
+        "patience": 10,
+        "min_delta": 0.0001
+    }
 }

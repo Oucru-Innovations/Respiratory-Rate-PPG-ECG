@@ -99,3 +99,6 @@ legacy/
 *.pth
 *.pt
 *.pkl
+
+# Ignore trials files
+trials/

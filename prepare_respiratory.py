@@ -24,7 +24,7 @@ logger = logging.getLogger('RespRateProcessor')
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-BASE_DIR = "/media/data/Workspace/Respiratory-Rate-PPG-ECG/dataset/Resp/24EIb-003-029/"
+BASE_DIR = "/media/data/Workspace/Respiratory-Rate-PPG-ECG/dataset/Resp"
 FINAL_OUTPUT = "final_mapped_resp_rate_full.csv"
 
 def process_and_combine_pleth(file_path):
@@ -84,13 +84,18 @@ def map_closest_resp_rate(processed_df, comparison_df, file_path):
         logger.error(f"Error mapping resp rate for file '{file_path}': {e}")
         return pd.DataFrame()
 
-def compile_all_data(base_dir, final_output):
+def compile_patient_data(patient_folder, output_folder):
     final_df = pd.DataFrame()
-    date_folders = glob.glob(os.path.join(base_dir, "*"))
+    patient_id = os.path.basename(patient_folder)
 
-    for date_folder in tqdm(date_folders, desc="Processing folders"):
+    date_folders = [
+        date_folder for date_folder in glob.glob(os.path.join(patient_folder, "*"))
+        if os.path.isdir(os.path.join(date_folder, "PPG")) and os.path.isdir(os.path.join(date_folder, "Monitor"))
+    ]
+
+    for date_folder in tqdm(date_folders, desc=f"Processing dates for {patient_id}", leave=False):
         ppg_files = glob.glob(os.path.join(date_folder, "PPG", "SmartCareCsv_*.csv"))
-        monitor_files = glob.glob(os.path.join(date_folder, "Monitor", "MonitorPhillips-MPDataExport*.csv"))
+        monitor_files = glob.glob(os.path.join(date_folder, "Monitor", "*MonitorPhillips-MPDataExport*processed*.csv"))
 
         if not ppg_files or not monitor_files:
             logger.warning(f"Missing PPG or Monitor files in folder: {date_folder}")
@@ -121,11 +126,68 @@ def compile_all_data(base_dir, final_output):
             final_df = pd.concat([final_df, mapped_df], ignore_index=True)
 
     if not final_df.empty:
+        os.makedirs(output_folder, exist_ok=True)
+        final_output = os.path.join(output_folder, f"{patient_id}_mapped.csv")
         final_df.to_csv(final_output, index=False)
-        logger.info(f"Data compilation complete. Final data saved to '{final_output}' ({len(final_df)} rows).")
-    else:
-        logger.error("No data compiled. Please check input directories and files.")
+        logger.info(f"Patient data compilation complete. Saved to '{final_output}' ({len(final_df)} rows).")
 
+        # Create training data for the patient
+        pleth_output_path = os.path.join(output_folder, "train_data.csv")
+        target_output_path = os.path.join(output_folder, "train_target.csv")
+        create_training_data(final_output, pleth_output_path, target_output_path)
+    else:
+        logger.error(f"No data compiled for patient {patient_id}. Check input files.")
+
+
+def compile_all_patients(base_dir, final_output_folder):
+    patient_folders = glob.glob(os.path.join(base_dir, "*"))
+
+    # Compile data patient-by-patient
+    for patient_folder in tqdm(patient_folders, desc="Compiling patient data"):
+        patient_output_folder = os.path.join(patient_folder, "compiled_data")
+        compile_patient_data(patient_folder, patient_output_folder)
+
+    # After individual processing, compile all patient data
+    all_train_data = []
+    all_train_target = []
+
+    # Gather all patient-level compiled data
+    for patient_folder in tqdm(patient_folders, desc="Aggregating all patients"):
+        compiled_data_folder = os.path.join(patient_folder, "compiled_data")
+        train_data_path = os.path.join(compiled_data_folder, "train_data.csv")
+        train_target_path = os.path.join(compiled_data_folder, "train_target.csv")
+
+        if os.path.exists(train_data_path) and os.path.exists(train_target_path):
+            patient_train_data = np.loadtxt(train_data_path, delimiter=",")
+            patient_train_target = np.loadtxt(train_target_path, delimiter=",")
+            
+            # Ensure 2D shape for targets
+            if patient_train_target.ndim == 1:
+                patient_train_target = patient_train_target.reshape(-1, 1)
+
+            all_train_data.append(patient_train_data)
+            all_train_target.append(patient_train_target)
+        else:
+            logger.warning(f"Missing training data for patient folder: {patient_folder}")
+
+    # Combine all data if not empty
+    if all_train_data and all_train_target:
+        combined_train_data = np.vstack(all_train_data)
+        combined_train_target = np.vstack(all_train_target)
+
+        # Save combined data
+        os.makedirs(final_output_folder, exist_ok=True)
+        combined_data_path = os.path.join(final_output_folder, "final_train_data.csv")
+        combined_target_path = os.path.join(final_output_folder, "final_train_target.csv")
+
+        np.savetxt(combined_data_path, combined_train_data, delimiter=",", fmt='%.5f')
+        np.savetxt(combined_target_path, combined_train_target, delimiter=",", fmt='%d')
+
+        logger.info(f"Final training data compiled successfully.")
+        logger.info(f"Combined train data shape: {combined_train_data.shape}, saved to '{combined_data_path}'")
+        logger.info(f"Combined train target shape: {combined_train_target.shape}, saved to '{combined_target_path}'")
+    else:
+        logger.error("No training data available for compilation.")
 
 def create_training_data(mapped_df_path, pleth_output_path, target_output_path):
     try:
@@ -146,12 +208,10 @@ def create_training_data(mapped_df_path, pleth_output_path, target_output_path):
         logger.error(f"Error creating training data: {e}")
 
 def main():
-    logger.info("Starting data compilation process...")
-    compile_all_data(BASE_DIR, FINAL_OUTPUT)
+    final_output_folder = os.path.join(BASE_DIR, "Final_Compiled_Data")
+    logger.info("Starting patient-level data compilation process...")
+    compile_all_patients(BASE_DIR, final_output_folder)
 
-    pleth_output_path = "train_data.csv"
-    target_output_path = "train_target.csv"
-    create_training_data(FINAL_OUTPUT, pleth_output_path, target_output_path)
 
 if __name__ == "__main__":
     main()

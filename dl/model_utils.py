@@ -6,6 +6,18 @@ import torch.nn.functional as F
 def adjust_learning_rate(optimizer, epoch):
     return
 
+def mse_loss():
+    return nn.MSELoss()
+
+def mae_loss():
+    return nn.L1Loss()
+
+def huber_loss(delta=1.0):
+    return nn.HuberLoss(delta=delta)
+
+def smooth_l1_loss():
+    return nn.SmoothL1Loss()
+
 class loss_uniform_spread_l2(nn.Module):
     def __init__(self, lambd_centroid=0.04,
                            lambd_close=0.01,
