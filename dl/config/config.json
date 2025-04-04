@@ -1,6 +1,6 @@
 {
     "signal_type": "ppg",
-    "model_type": "vit_wave",
+    "model_type": "convnext",
     "fs_ecg": 128,
     "fs_ppg": 100,
     "num_classes": 64,

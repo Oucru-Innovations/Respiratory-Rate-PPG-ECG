@@ -102,3 +102,7 @@ legacy/
 
 # Ignore trials files
 trials/
+best_trial/
+
+# Ignore huggingface files
+hf_model/
