@@ -251,6 +251,46 @@ def fine_tune():
     study.optimize(objective, n_trials=load_tuning_config()["n_trials"])
     logger.info(f"🏆 Best trial: {study.best_trial.params} with val_loss={study.best_trial.value:.4f}")
 
+#================= Inference ================ #
+def load_inference_config(path='dl/config/inference_config.json'):
+    with open(path, 'r') as f:
+        return json.load(f)
+
+def run_inference():
+    logger.info("🧠 Running inference...")
+
+    cfg = load_config()
+    infer_cfg = load_inference_config()
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = get_model(cfg)
+    model.load_state_dict(torch.load("best_model.pth"))
+    model.to(device)
+    model.eval()
+
+    data = read_csv_data(infer_cfg["data_path"], "Inference Data", is_target=False)
+    dataset = WearableDataset(data, targets=None)
+    loader = DataLoader(dataset, batch_size=infer_cfg.get("batch_size", 64), shuffle=False)
+
+    predictions = []
+
+    with torch.no_grad():
+        for original_input, inputs, _ in tqdm(loader, desc="Inferring", colour="blue"):
+            inputs = inputs.to(device)
+            outputs = model((original_input.to(device), inputs))
+            predictions.extend(outputs.cpu().numpy().flatten())
+
+    # Save predictions to file
+    output_path = infer_cfg.get("output_path", "inference_results.csv")
+    df = pd.DataFrame({'Prediction': predictions})
+    df.to_csv(output_path, index=False)
+    logger.info(f"✅ Inference complete. Results saved to: {output_path}")
+    mlflow.log_artifact(output_path)
+
+    # Optional: return for downstream use
+    return predictions
+
+
 # ============ Testing ============ #
 def test_model(config, hyperparams):
     logger.info("🧪 Running final test on saved model...")
@@ -285,7 +325,7 @@ def test_model(config, hyperparams):
 # ============ CLI ============ #
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['train', 'fine_tune', 'test'], default='fine_tune')
+    parser.add_argument('--mode', choices=['train', 'fine_tune', 'test', 'inference'], default='fine_tune')
     args = parser.parse_args()
     cfg = load_config()
     default_hyper = {
@@ -298,5 +338,7 @@ if __name__ == "__main__":
         fine_tune()
     elif args.mode == 'test':
         test_model(cfg, default_hyper)
+    elif args.mode == 'inference':
+        run_inference()
     else:
         train_model(cfg, default_hyper)
