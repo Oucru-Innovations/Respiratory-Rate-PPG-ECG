@@ -1,0 +1,8 @@
+# Active code (tested with these versions in the `kaggle` conda env).
+# The pinned list for the archived 2023 code is archive/requirements_legacy.txt.
+numpy>=2.0
+scipy>=1.11
+pandas>=2.1
+pyarrow>=14
+torch>=2.1          # dl/ only
+matplotlib>=3.8     # scripts/make_report.py only

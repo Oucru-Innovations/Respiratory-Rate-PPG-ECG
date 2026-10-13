@@ -1,0 +1,18 @@
+# patient data (raw exports, clinical notes, the built 01NVa dataset): never commit
+dataset/
+
+# training runs, caches, editor settings
+runs/
+__pycache__/
+.ipynb_checkpoints/
+.vscode/
+
+# archived data / outputs: kept on disk for reference, too large or not code
+archive/legacy_data/
+archive/legacy_outputs/
+archive/notebooks/*.csv
+archive/notebooks/*.dat
+archive/notebooks/*.qrs
+
+# reports/ and notebooks/ are committed on purpose so results can be read
+# without rebuilding (regenerate with: bash scripts/build_report.sh 0)
