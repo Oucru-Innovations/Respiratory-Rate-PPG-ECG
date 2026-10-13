@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+<<<<<<< HEAD:archive/common/utils.py
 from pandas.core.dtypes.common import is_numeric_dtype
 # from RRest.common.rpeak_detection import PeakDetector
 from hrvanalysis import get_nn_intervals
@@ -155,3 +156,6 @@ def create_rule_def(sqi_name, upper_bound=0, lower_bound=1):
         "ref": ""
     }
     return json_rule_dict
+=======
+import vitalDSP as vdsp
+>>>>>>> 6dff71e2045db392cb79ed6bb8996c199f53b90f:common/utils.py
