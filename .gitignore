@@ -1,12 +1,38 @@
-<<<<<<< HEAD
 # patient data (raw exports, clinical notes, the built 01NVa dataset): never commit
 dataset/
 
-# training runs, caches, editor settings
+# training runs, model weights, caches, logs
 runs/
+*.pth
+*.log
 __pycache__/
+*.py[cod]
+*$py.class
 .ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+
+# environments and editors
+venv/
+env/
+.venv/
+.env
+*.env
 .vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+*.swp
+*.swo
+*.tmp
+*.bak
+
+# packaging
+*.egg
+*.egg-info/
+dist/
+build/
 
 # archived data / outputs: kept on disk for reference, too large or not code
 archive/legacy_data/
@@ -17,79 +43,3 @@ archive/notebooks/*.qrs
 
 # reports/ and notebooks/ are committed on purpose so results can be read
 # without rebuilding (regenerate with: bash scripts/build_report.sh 0)
-=======
-# Ignore Python bytecode and cache files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Ignore virtual environments
-venv/
-env/
-.venv/
-.env/
-
-# Ignore Jupyter Notebook checkpoints
-.ipynb_checkpoints
-
-# Ignore VSCode settings
-.vscode/
-
-# Ignore macOS system files
-.DS_Store
-
-# Ignore Python egg files
-*.egg
-*.egg-info/
-dist/
-build/
-eggs/
-parts/
-var/
-*.so
-
-# Ignore environment variables
-.env
-*.env
-
-# Ignore coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-*.cover
-*.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.coveragerc
-*.codecov.yml
-
-# Ignore mypy type check reports
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Ignore model path files
-*.pth
-
-# Ignore temporary files and directories
-*.log
-*.tmp
-*.swp
-*.swo
-*.bak
-
-# Ignore pytest cache
-.pytest_cache/
-
-# Ignore IntelliJ IDEA files
-.idea/
-
-# Ignore Sublime Text files
-*.sublime-project
-*.sublime-workspace
-
-# Ignore miscellaneous files
-*.~undo-tree~
->>>>>>> 6dff71e2045db392cb79ed6bb8996c199f53b90f

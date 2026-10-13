@@ -9,6 +9,7 @@ Folder map:
 | `legacy_outputs/` | outputs of the retired pipeline: training plots, `results/*.csv`, `study.pkl` (Optuna), `mlruns/`, `saved_models/`, `artifacts/`, scratch files. Results here were produced with the bugs below and should not be cited |
 | `legacy_data/bk/` | 7 GB of CSVs built by the leaky `compose_rr_data*` scripts (git-ignored) |
 | `requirements_legacy.txt` | pinned environment of the old code |
+| `refactor_2024/` | the 2024 refactor that was on GitHub (`origin/master`, commits dc3ad35..6dff71e) but not in the local copy audited here; merged on 2026-10-13 and archived (see the last section) |
 
 Code moved here after the October 2026 audit. It is kept for reference only. Do not import it from
 the active code; most of it no longer runs (it imports the non-existent `RRest`
@@ -75,3 +76,24 @@ synthetic signals at 8–30 bpm only `CtA` returned correct rates.
   not R peaks) and usually falls back to 20.
 * `eval_segment.py`: evaluates a different architecture (64 classes) from the one
   trained (40); `mode='test'` returns 2 items but 3 are unpacked; no metrics.
+
+## `refactor_2024/` (2024 refactor, merged 2026-10-13, archived)
+
+These commits reached this copy only through the October 2026 merge. They
+reworked every method but kept the core design flaw of the 2023 code, and could
+not run after the merge (they import `preprocess.band_filter` and
+`estimate_rr.ARM`, …, which are archived). Files are kept byte-for-byte; the
+old front-page README is `README_2024_front_page.md`.
+
+| Area | Defect |
+|---|---|
+| All methods | Still run on the raw PPG/ECG band-passed to 0.1–0.5 Hz (PPG 0.1–0.4 Hz), so only baseline wander is used and rates above 30 bpm (PPG: 24 bpm) are filtered out; the 01NVa median is 24.5 bpm. Failures return **0 bpm**, which then enters averages. |
+| `ARM.py`, `AR_RR.py` | `fftfreq(fs)` without the sample spacing gives cycles per sample, so the "0.1–0.5 Hz" band is 10–50 Hz at 100 Hz sampling; the "ARMA spectrum" adds the AR and MA spectra instead of dividing them; the second estimator counts peaks of AR residuals (whitened noise). |
+| `WCH.py` | Averages FFT, Welch and STFT, but `nperseg = len(sig)` makes all three the same periodogram. |
+| `CtA.py` | No longer count-adv (Schäfer & Kratky 2008): plain `find_peaks` with a mean + 0.2·SD threshold. |
+| `CtO.py` | Peak threshold 0 instead of 0.2 × Q3; rate from the last 3 cycles only. |
+| `PZX.py` | Counts up- *and* down-going zero crossings, so it reports about twice the breathing rate. |
+| `EMD.py` | Picks an IMF by its FFT peak in the same 0.1–0.5 Hz band; needs `PyEMD`. |
+| `fusion/` | "voting" takes the mode of continuous estimates; `estimate_fusion` calls `get_rr(signal, fs, preprocess, signal_type)` while `ARM`/`ARP`/`AR_RR`/`freq_rr` take `(sig, fs, signal_type, preprocess)`, so the two flags are swapped for them. |
+| `ml/` | XGBoost fusion with a random window-level split (`test_size=0.8`): the same patients are in train and test. |
+| `common/rpeak_detection.py`, `utils.py` | Depend on `vitalDSP` / `hrvanalysis`; not used by the active code. |

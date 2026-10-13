@@ -1,0 +1,14 @@
+pandas
+scipy
+numpy
+scikit-learn
+xgboost
+lightgbm
+vitalDSP
+pywavelets
+statsmodels
+torch
+torchvision
+efficientnet_pytorch
+plotly
+spectrum

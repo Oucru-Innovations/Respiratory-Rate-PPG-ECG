@@ -1,25 +1,10 @@
-<<<<<<< HEAD
 # Active code (tested with these versions in the `kaggle` conda env).
-# The pinned list for the archived 2023 code is archive/requirements_legacy.txt.
+# Older dependency lists: archive/requirements_legacy.txt (2023 code) and
+# archive/refactor_2024/requirements.txt (2024 refactor).
 numpy>=2.0
 scipy>=1.11
 pandas>=2.1
 pyarrow>=14
 torch>=2.1          # dl/ only
 matplotlib>=3.8     # scripts/make_report.py only
-=======
-pandas
-scipy
-numpy
-scikit-learn
-xgboost
-lightgbm
-vitalDSP
-pywavelets
-statsmodels
-torch
-torchvision
-efficientnet_pytorch
-plotly
-spectrum
->>>>>>> 6dff71e2045db392cb79ed6bb8996c199f53b90f
+# notebooks/ additionally need jupyter and plotly
