@@ -21,7 +21,7 @@ import torch
 
 from data_prep.build_dataset import TARGET_FS
 from dl.features import SpecConfig, make_features
-from dl.model import LabelDistribution, SpectroCNN
+from dl.model import LabelDistribution, build_model
 from estimate_rr import FUSIONS, MODULATIONS, extract_resp_signals, rate_from_resp_signal
 
 TRAD = ("count_orig", "ar_median", "welch")
@@ -80,7 +80,7 @@ def main():
             rows.extend(ro)
 
     ldl = LabelDistribution(sigma=ckpt["ldl"]["sigma"]).to(device)
-    model = SpectroCNN(**ckpt["model"]).to(device).eval()
+    model = build_model(**ckpt["model"]).to(device).eval()
     model.load_state_dict(ckpt["state_dict"])
     shape = tuple(ckpt["features"]["shape"])
     ok = np.array([f is not None and f.shape == shape and np.all(np.isfinite(f)) for f in feats])

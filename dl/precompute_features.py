@@ -37,7 +37,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--windows", required=True)
     ap.add_argument("--signal", choices=["ppg", "ecg"], required=True)
-    ap.add_argument("--kind", choices=["modulation", "raw"], default="modulation")
+    ap.add_argument("--kind", choices=["modulation", "raw", "modwave", "modwave_hr"], default="modulation")
     ap.add_argument("--stft-window", type=float, default=16.0)
     ap.add_argument("--out", required=True)
     ap.add_argument("--workers", type=int, default=8)

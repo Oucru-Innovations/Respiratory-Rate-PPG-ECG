@@ -30,6 +30,78 @@ class TestReference(unittest.TestCase):
         self.assertFalse(reference_rr(x, 25)["ref_ok"])
 
 
+@unittest.skipIf(torch is None, "torch not installed")
+class TestBreathNet2(unittest.TestCase):
+    def test_variants_forward(self):
+        import torch
+        from dl.model import BreathNet, BreathNet2, LabelDistribution
+        torch.manual_seed(0)
+        ldl = LabelDistribution()
+        x = torch.randn(4, 4, 240)
+        x[:, 3] = 0.85                                   # heart-rate channel: 85 bpm
+        for variant in ("", "whiten", "coherent", "track", "hr", "conv", "whiten,coherent,track,hr"):
+            m = BreathNet2(4, 240, 57, variant=variant, hr_channel=True)
+            logits, d = m(x, return_details=True)
+            self.assertEqual(tuple(logits.shape), (4, 57), variant)
+            ldl.loss(logits, torch.full((4,), 18.0)).backward()
+            self.assertTrue(all(torch.isfinite(p.grad).all() for p in m.parameters() if p.grad is not None), variant)
+        n = lambda m: sum(p.numel() for p in m.parameters())
+        self.assertEqual(n(BreathNet2(3, 240, 57, variant="")), n(BreathNet(3, 240, 57)))
+        self.assertLess(n(BreathNet2(3, 240, 57, variant="track")), 1000)   # attention gone
+        with self.assertRaises(ValueError):
+            BreathNet2(4, 240, 57, variant="track,conv", hr_channel=True)
+        with self.assertRaises(ValueError):
+            BreathNet2(3, 240, 57, variant="hr")                           # needs the HR channel
+
+    def test_whitening_removes_power_law(self):
+        import torch
+        from dl.model import BreathNet2
+        m = BreathNet2(3, 240, 57, variant="whiten")
+        e = 0.7 - 1.3 * m.log_rate_c[None, None, :, None].expand(2, 3, 57, 5)
+        self.assertLess(m._whiten(e).abs().max().item(), 1e-4)
+
+    def test_tracking_posterior(self):
+        import torch
+        from dl.model import BreathNet2
+        m = BreathNet2(3, 240, 57, variant="track")
+        s = torch.zeros(1, 57, 60)
+        s[0, 20] = 6.0                                   # evidence ridge at bin 20 in every frame
+        out = m._track(s)
+        self.assertEqual(out.argmax().item(), 20)
+        self.assertAlmostEqual(torch.logsumexp(out, 1).item(), 0.0, places=4)   # a log-distribution
+
+    def test_hr_prior_ceiling(self):
+        import torch
+        from dl.model import BreathNet2
+        m = BreathNet2(4, 240, 57, variant="hr", hr_channel=True)
+        prior = m._hr_prior(torch.tensor([60.0]))[0]     # rates 4..60 bpm; ceiling at HR/2 = 30
+        self.assertGreater(prior[14], prior[50])         # 18 bpm plausible, 54 bpm above the ceiling
+
+
+class TestBreathNet(unittest.TestCase):
+    def test_untrained_prior_finds_the_rate(self):
+        # the resonator bank + harmonic summation alone should already peak at
+        # the breathing rate: output bin k is resonator k
+        from dl.features import SpecConfig, make_features
+        from dl.model import BreathNet, LabelDistribution
+        ldl, m = LabelDistribution(), BreathNet(3, 240, 57).eval()
+        for rr in (8, 18, 30, 45):
+            x = make_features(synth_ppg(rr, hr_bpm=90), 100, "ppg", SpecConfig(kind="modwave"))
+            with torch.no_grad():
+                logits, det = m(torch.from_numpy(x)[None], return_details=True)
+            self.assertLessEqual(abs(float(ldl.bins[logits.argmax()]) - rr), 1.5, rr)
+            torch.testing.assert_close(det["pathway_weight"].sum(1), torch.ones(1))
+
+    def test_shapes_and_gradients(self):
+        from dl.model import BreathNet
+        m = BreathNet(3, 240, 57)
+        out = m(torch.randn(4, 3, 240))
+        self.assertEqual(out.shape, (4, 57))
+        out.sum().backward()
+        self.assertIsNotNone(m.bank.log_sigma.grad)  # resonator bandwidths are learned
+        self.assertEqual(m(torch.randn(2, 3, 120)).shape, (2, 57))  # 30-s windows
+
+
 class TestSegmentIds(unittest.TestCase):
     def test_exports_in_same_day_folder_get_distinct_ids(self):
         from data_prep.build_dataset import segment_id
@@ -86,6 +158,26 @@ class TestFeaturesAndModel(unittest.TestCase):
         self.assertTrue(58.5 < dec[3] < 60.0)
         model = SpectroCNN(3, 60, ldl.n_bins)
         self.assertEqual(model(torch.randn(2, 3, 60, 45)).shape, (2, ldl.n_bins))
+
+    def test_transformer_shapes_and_attention(self):
+        from dl.model import SpectroTransformer, build_model
+        for c, f, tokens in [(3, 60, "frame"), (1, 154, "frame"), (3, 60, "patch"), (1, 154, "patch")]:
+            with self.subTest(c=c, f=f, tokens=tokens):
+                m = SpectroTransformer(c, f, 57, tokens=tokens, d_model=32, depth=1).eval()
+                out, attn = m(torch.randn(2, c, f, 45), return_attention=True)
+                self.assertEqual(out.shape, (2, 57))
+                torch.testing.assert_close(attn.sum(dim=(1, 2)), torch.ones(2))
+                # 30-s windows give fewer frames; the same model must accept them
+                self.assertEqual(m(torch.randn(2, c, f, 15)).shape, (2, 57))
+        # every small architecture: right output shape on 60- and 30-s windows
+        for arch in ("lstm", "gru", "unet", "mlp"):
+            for c, f in ((3, 60), (1, 154)):
+                with self.subTest(arch=arch, c=c, f=f):
+                    m = build_model(arch, in_channels=c, n_freq=f, n_out=57).eval()
+                    self.assertEqual(m(torch.randn(2, c, f, 45)).shape, (2, 57))
+                    self.assertEqual(m(torch.randn(2, c, f, 15)).shape, (2, 57))
+        # checkpoints written before `arch` existed still build a CNN
+        self.assertEqual(type(build_model(in_channels=3, n_freq=60, n_out=57, width=8)).__name__, "SpectroCNN")
 
 
 if __name__ == "__main__":

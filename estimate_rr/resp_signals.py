@@ -42,6 +42,7 @@ class RespSignals:
     n_beats: int = 0
     hr: float = np.nan                 # median heart rate, bpm
     beat_reject_frac: float = 1.0      # fraction of beats rejected as implausible
+    hr_series: np.ndarray = None       # instantaneous heart rate (bpm) on the same grid, from the FM intervals
 
     @property
     def ok(self):
@@ -148,4 +149,6 @@ def extract_resp_signals(x, fs, signal_type, band=DEFAULT_BAND, resp_fs=RESP_FS,
             continue
         _, yu = interpolate_uniform(t, v, resp_fs, t_start=0.0, t_end=duration)
         out.signals[name] = _finish(yu, resp_fs, band)
+        if name == "fm":   # the beat intervals also give the heart rate itself (not band-passed)
+            out.hr_series = interpolate_uniform(t, 60.0 / v, resp_fs, t_start=0.0, t_end=duration)[1]
     return out

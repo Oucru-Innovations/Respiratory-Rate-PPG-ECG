@@ -19,7 +19,10 @@ from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from common.metrics import metrics_by_range, rr_metrics
 from common.splits import patient_split
-from dl.model import LabelDistribution, SpectroCNN
+from dl.model import ARCHS, WAVEFORM_ARCHS, LabelDistribution, build_model
+
+DEFAULT_WIDTH = {"cnn": 32, "lstm": 64, "gru": 64, "unet": 16, "mlp": 128, "breathnet": 32, "breathnet2": 32}
+CLIPPED = {"transformer", "lstm", "gru", "breathnet", "breathnet2"}
 
 
 class FeatureDataset(Dataset):
@@ -84,6 +87,38 @@ def make_loader(features_file, df, batch, workers, train, balance=False):
                       num_workers=workers, pin_memory=True, persistent_workers=workers > 0)
 
 
+def model_kwargs(args, shape, n_out, feat_kind="modwave"):
+    """Constructor arguments for ``args.arch`` given the feature shape; stored in
+    the checkpoint so evaluation rebuilds the identical model."""
+    waveform = len(shape) == 2
+    if waveform != (args.arch in WAVEFORM_ARCHS):
+        raise SystemExit(f"--arch {args.arch} needs {'waveform (modwave)' if not waveform else 'spectrogram'} "
+                         f"features; got shape {shape}")
+    width = args.width or DEFAULT_WIDTH.get(args.arch)
+    if waveform:
+        kw = {"arch": args.arch, "in_channels": shape[0], "n_samples": shape[1], "n_out": n_out,
+              "width": width, "dropout": args.dropout}
+        hr_channel = feat_kind == "modwave_hr"
+        if args.arch == "breathnet2":
+            kw.update(variant=args.variant, hr_channel=hr_channel)
+            if "hr" in args.variant.split(",") and not hr_channel:
+                raise SystemExit("--variant hr needs modwave_hr features (python -m dl.precompute_features --kind modwave_hr)")
+        elif hr_channel:
+            raise SystemExit(f"--arch {args.arch} takes modwave features; modwave_hr is for breathnet2")
+        return kw
+    kw = {"arch": args.arch, "in_channels": shape[0], "n_freq": shape[1], "n_out": n_out}
+    if args.arch == "transformer":
+        kw.update(tokens=args.tokens, d_model=args.d_model, depth=args.depth or 4,
+                  heads=args.heads, dropout=args.dropout)
+    elif args.arch in ("lstm", "gru"):
+        kw.update(width=width, depth=args.depth or 2, dropout=args.dropout)
+    elif args.arch == "mlp":
+        kw.update(width=width, dropout=args.dropout)
+    else:  # cnn, unet
+        kw["width"] = width
+    return kw
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--features", required=True)
@@ -96,7 +131,19 @@ def main():
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=1e-2)
-    ap.add_argument("--width", type=int, default=32)
+    ap.add_argument("--arch", choices=sorted(ARCHS), default="cnn")
+    ap.add_argument("--width", type=int, default=None,
+                    help="CNN width / RNN hidden size / U-Net base channels / MLP and BreathNet hidden "
+                         f"(defaults {DEFAULT_WIDTH})")
+    ap.add_argument("--tokens", choices=["frame", "patch"], default="frame", help="transformer tokens")
+    ap.add_argument("--d-model", type=int, default=128)
+    ap.add_argument("--depth", type=int, default=None, help="transformer layers (4) / RNN layers (2)")
+    ap.add_argument("--heads", type=int, default=4)
+    ap.add_argument("--dropout", type=float, default=0.1, help="dropout (all but CNN and U-Net)")
+    ap.add_argument("--variant", default="whiten,coherent,track,hr",
+                    help="breathnet2 mechanisms, comma-separated subset of whiten,coherent,track,hr,conv")
+    ap.add_argument("--clip-grad", type=float, default=None,
+                    help="max grad norm (default: 1.0 for transformer, LSTM, GRU, BreathNet; off otherwise)")
     ap.add_argument("--sigma", type=float, default=1.5, help="label-distribution width (bpm)")
     ap.add_argument("--balance", action="store_true", help="oversample rare RR ranges")
     ap.add_argument("--workers", type=int, default=4)
@@ -121,8 +168,9 @@ def main():
         raise SystemExit("a split is empty: need at least 3 patients with usable windows")
 
     ldl = LabelDistribution(sigma=args.sigma).to(device)
-    c, n_freq, _ = feat_cfg["shape"]
-    model = SpectroCNN(c, n_freq, ldl.n_bins, width=args.width).to(device)
+    model_kw = model_kwargs(args, feat_cfg["shape"], ldl.n_bins, feat_cfg["spec"]["kind"])
+    clip = args.clip_grad if args.clip_grad is not None else (1.0 if args.arch in CLIPPED else 0.0)
+    model = build_model(**model_kw).to(device)
     print(f"model parameters: {sum(p.numel() for p in model.parameters()):,}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * max(
@@ -133,8 +181,7 @@ def main():
     test_dl = make_loader(feat_file, parts["test"], args.batch, args.workers, False)
 
     ckpt = {"args": vars(args), "features": feat_cfg, "split": split,
-            "ldl": {"sigma": args.sigma}, "model": {"in_channels": c, "n_freq": n_freq,
-                                                     "n_out": ldl.n_bins, "width": args.width}}
+            "ldl": {"sigma": args.sigma}, "model": model_kw}
     best, bad_epochs, history = np.inf, 0, []
     for epoch in range(args.epochs):
         t0 = time.time()
@@ -145,6 +192,8 @@ def main():
             loss = ldl.loss(model(x), y)
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            if clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
             opt.step()
             sched.step()
             tot += loss.item() * len(y)

@@ -1,10 +1,14 @@
 """Build the offline benchmark report (figures + report.html) from whatever runs exist.
 
-Re-run any time; missing runs are listed as pending.
+With several folds, every estimator is scored on the pooled out-of-fold test
+predictions: each patient is a test patient in exactly one fold, so the pooled
+results cover every patient once. A comparison only uses the folds in which all
+of its estimators have finished; anything missing is shown as pending.
 
 Usage::
 
-    python -m scripts.make_report --fold 0 --out reports/fold0
+    python -m scripts.make_report --folds 0 1 2 3 4 --out reports/cv
+    python -m scripts.make_report --folds 0 --out reports/fold0
 """
 import argparse
 import json
@@ -25,7 +29,32 @@ DATASET = Path("dataset/01NVa_monitor")
 WINDOWS = DATASET / "windows_w60_s30.parquet"
 RUNS = Path("runs")
 SIGNALS = ("ppg", "ecg")
-DL_KINDS = {"mod": "DL · BW/AM/FM spectrogram", "raw": "DL · raw-signal STFT"}
+DL_KINDS = {"mod": "DL CNN · BW/AM/FM spectrogram", "raw": "DL CNN · raw-signal STFT",
+            "mod_tf": "DL transformer · BW/AM/FM spectrogram", "raw_tf": "DL transformer · raw-signal STFT"}
+# kind -> run-name suffix after "<signal>_"
+DL_RUNS = {"mod": "mod_w60", "raw": "raw_w60", "mod_tf": "mod_w60_tf-frame", "raw_tf": "raw_w60_tf-frame"}
+# architecture comparison. Per input: (input key, label, CNN baseline run suffix,
+# [(run suffix, model label), ...]); every model is compared with the CNN on the same windows.
+ARCH_GROUPS = [
+    ("mod", "BW/AM/FM spectrogram", "mod_w60",
+     [("mod_w60", "CNN"), ("mod_w60_tf-frame", "Transformer, frame tokens"),
+      ("mod_w60_tf-patch", "Transformer, patch tokens"), ("mod_w60_lstm", "LSTM"), ("mod_w60_gru", "GRU"),
+      ("mod_w60_unet", "U-Net"), ("mod_w60_mlp", "MLP on time-averaged spectrum"),
+      ("modwave_w60_breathnet", "BreathNet (waveform input)"),
+      ("modwavehr_w60_breathnet2-whiten", "BreathNet + explicit 1/f whitening"),
+      ("modwavehr_w60_breathnet2-coherent", "BreathNet + coherent pathway sum"),
+      ("modwavehr_w60_breathnet2-track", "BreathNet + HMM rhythm tracking"),
+      ("modwavehr_w60_breathnet2-hr", "BreathNet + heart-rate prior"),
+      ("modwavehr_w60_breathnet2-conv", "BreathNet + conv decision head"),
+      ("modwavehr_w60_breathnet2", "BreathNet-2 (whitening + coherent + tracking + HR prior)"),
+      ("modwavehr_w60_breathnet2-coh-hr", "BreathNet + coherent + HR prior"),
+      ("modwavehr_w60_breathnet2-coh-hr-track", "BreathNet + coherent + HR prior + HMM tracking"),
+      ("modwavehr_w60_breathnet2-coh-hr-conv", "BreathNet + coherent + HR prior + conv head"),
+      ("modwavehr_w60_breathnet2-all-conv", "BreathNet-2c (whitening + coherent + HR prior + conv head)")]),
+    ("raw", "raw-signal STFT", "raw_w60",
+     [("raw_w60", "CNN"), ("raw_w60_tf-frame", "Transformer, frame tokens"), ("raw_w60_lstm", "LSTM"),
+      ("raw_w60_gru", "GRU"), ("raw_w60_unet", "U-Net"), ("raw_w60_mlp", "MLP on time-averaged spectrum")]),
+]
 SIGNAL_LABELS = {"smart": "smart fusion", "median": "median fusion", "bwf": "filtered BW",
                  "pub-smart": "smart fusion, as published", "pub-median": "median fusion, as published"}
 RANGES = [(0, 12), (12, 20), (20, 30), (30, 40), (40, 100)]
@@ -48,16 +77,39 @@ plt.rcParams.update({
 
 
 # ------------------------------------------------------------------ loading
-def load_dl(sig, kind, fold):
-    run = RUNS / f"{sig}_{kind}_w60_f{fold}"
-    if not (run / "test_predictions.csv").exists():
-        return None
-    return pd.read_csv(run / "test_predictions.csv")
+def _folds(folds):
+    return [folds] if isinstance(folds, int) else list(folds)
 
 
-def load_traditional(sig, fold):
-    p = RUNS / f"traditional_{sig}_f{fold}" / "predictions.parquet"
-    return pd.read_parquet(p) if p.exists() else None
+def dl_folds(sig, kind, folds):
+    """Folds (of ``folds``) in which this DL run has finished."""
+    stem = DL_RUNS.get(kind, kind)
+    return [k for k in _folds(folds) if (RUNS / f"{sig}_{stem}_f{k}" / "test_predictions.csv").exists()]
+
+
+def load_dl(sig, kind, folds):
+    """Pooled out-of-fold test predictions of one DL run over ``folds`` (an int
+    or a list); ``None`` when no fold has finished. Adds a ``fold`` column."""
+    stem = DL_RUNS.get(kind, kind)
+    parts = [pd.read_csv(RUNS / f"{sig}_{stem}_f{k}" / "test_predictions.csv").assign(fold=k)
+             for k in dl_folds(sig, kind, folds)]
+    return pd.concat(parts, ignore_index=True) if parts else None
+
+
+def trad_path(sig, fold, single):
+    """Signal-processing benchmark of one fold: every test window (``_all``), or
+    the original 15k-window fold-0 sample when building a single-fold report."""
+    full = RUNS / f"traditional_{sig}_f{fold}_all" / "predictions.parquet"
+    if full.exists():
+        return full
+    sample = RUNS / f"traditional_{sig}_f{fold}" / "predictions.parquet"
+    return sample if single and sample.exists() else None
+
+
+def load_traditional(sig, folds):
+    folds = _folds(folds)
+    parts = [pd.read_parquet(p).assign(fold=k) for k in folds if (p := trad_path(sig, k, len(folds) == 1))]
+    return pd.concat(parts, ignore_index=True) if parts else None
 
 
 def best_traditional(trad, fusion):
@@ -71,19 +123,23 @@ def best_traditional(trad, fusion):
 
 
 # ------------------------------------------------------------------ tables
-def comparison_table(sig, fold, windows):
-    """All estimators scored on the SAME windows (the traditional-benchmark sample)."""
-    trad = load_traditional(sig, fold)
+def comparison_table(sig, folds, windows):
+    """All estimators scored on the SAME windows: the signal-processing benchmark
+    windows of the folds in which the CNN baseline has also finished."""
+    folds = _folds(folds)
+    usable = [k for k in folds if trad_path(sig, k, len(folds) == 1) and k in dl_folds(sig, "mod", folds)]
+    trad = load_traditional(sig, usable) if usable else None
     if trad is None:
         return None, None
     df = trad.copy()
     df["hr"] = windows.loc[df["window_row"], f"{sig}_hr"].to_numpy()
     rows = []
     for kind, label in DL_KINDS.items():
-        dl = load_dl(sig, kind, fold)
-        if dl is None:
-            rows.append({"estimator": label, "pending": True})
+        have = dl_folds(sig, kind, usable)
+        if have != usable:  # compare only on identical windows
+            rows.append({"estimator": label, "pending": True, "folds_done": len(dl_folds(sig, kind, folds))})
             continue
+        dl = load_dl(sig, kind, usable)
         df = df.merge(dl[["window_row", "pred_rr"]].rename(columns={"pred_rr": f"dl_{kind}"}),
                       on="window_row", how="left")
         rows.append({"estimator": label, "column": f"dl_{kind}",
@@ -107,6 +163,207 @@ def stratified(df, col, by, edges):
             out.append({"bin": f"{lo:g}–{hi:g}" if hi < 100 else f"≥{lo:g}", "n": int(m.sum()),
                         **rr_metrics(df.loc[m, "ref_rr"], df.loc[m, col])})
     return pd.DataFrame(out)
+
+
+def _run_info(run):
+    """Test metrics, epochs, seconds/epoch and parameter count of one DL run."""
+    import torch
+    m = json.loads((run / "metrics.json").read_text())
+    hist = pd.read_csv(run / "history.csv")
+    from dl.model import build_model
+    ckpt = torch.load(run / "best.pt", map_location="cpu", weights_only=False)
+    n_params = sum(p.numel() for p in build_model(**ckpt["model"]).parameters())   # trainable only, no buffers
+    return {**m["test"], "val_patient_mae": m["best_val_patient_mae"], "epochs": len(hist),
+            "sec_per_epoch": float(hist["sec"].mean()), "params": int(n_params),
+            "arch": ckpt["model"].get("arch", "cnn"), "tokens": ckpt["model"].get("tokens")}
+
+
+def _run_dir(stem, fold):
+    return RUNS / f"{stem}_f{fold}"
+
+
+def _stem_folds(stem, folds):
+    return [k for k in folds if (_run_dir(stem, k) / "test_predictions.csv").exists()
+            and (_run_dir(stem, k) / "metrics.json").exists()]
+
+
+def _pooled_preds(stem, folds):
+    return pd.concat([pd.read_csv(_run_dir(stem, k) / "test_predictions.csv").assign(fold=k) for k in folds],
+                     ignore_index=True)
+
+
+def arch_comparison(folds):
+    """Every trained architecture, pooled over the folds in which both it and its
+    input's CNN baseline have finished; compared with the CNN by a paired
+    per-patient Wilcoxon test on those (identical) windows. Per-fold per-patient
+    MAE gives the fold-to-fold spread; size and CPU cost come from the fold-0 run."""
+    from scipy.stats import wilcoxon
+    folds = _folds(folds)
+    foot = RUNS / "footprint_f0.csv"
+    foot = pd.read_csv(foot).set_index("run") if foot.exists() else None
+    rows = []
+    for sig in SIGNALS:
+        for key, input_label, base_suffix, models in ARCH_GROUPS:
+            base_stem = f"{sig}_{base_suffix}"
+            base_folds = _stem_folds(base_stem, folds)
+            if not base_folds:
+                continue
+            for suffix, label in models:
+                stem = f"{sig}_{suffix}"
+                row = {"signal": sig, "input": input_label, "model": label, "run": stem,
+                       "is_baseline": suffix == base_suffix}
+                fk = [k for k in _stem_folds(stem, folds) if k in base_folds]
+                if not fk:
+                    if "tf-patch" not in suffix or sig == "ppg":  # patch tokens were only tried on PPG
+                        rows.append({**row, "pending": True, "n_folds": 0})
+                    continue
+                info0 = _run_info(_run_dir(stem, fk[0]))
+                b = _pooled_preds(stem, fk)
+                per_fold = [rr_metrics(g["ref_rr"], g["pred_rr"], g["patient_id"])["patient_macro_mae"]
+                            for _, g in b.groupby("fold")]
+                vals = [json.loads((_run_dir(stem, k) / "metrics.json").read_text())["best_val_patient_mae"] for k in fk]
+                row.update(rr_metrics(b["ref_rr"], b["pred_rr"], b["patient_id"]),
+                           params=info0["params"], arch=info0["arch"], n_folds=len(fk), folds=fk,
+                           fold_patient_mae=per_fold, fold_sd=float(np.std(per_fold, ddof=1)) if len(fk) > 1 else float("nan"),
+                           val_patient_mae=float(np.mean(vals)))
+                f0 = f"{stem}_f0"
+                if foot is not None and f0 in foot.index:   # trainable parameters (the checkpoint also holds buffers)
+                    row.update(params=int(foot.loc[f0, "params"]), net_ms=float(foot.loc[f0, "net_ms"]),
+                               feature_ms=float(foot.loc[f0, "feature_ms"]))
+                if not row["is_baseline"]:
+                    a = _pooled_preds(base_stem, fk)
+                    m = a.merge(b[["window_row", "pred_rr"]], on="window_row", suffixes=("_cnn", "_x"))
+                    err_c, err_x = m["pred_rr_cnn"] - m["ref_rr"], m["pred_rr_x"] - m["ref_rr"]
+                    per = pd.DataFrame({"c": err_c.abs(), "x": err_x.abs(), "p": m["patient_id"]}).groupby("p").mean()
+                    d = per["x"] - per["c"]
+                    folds_better = sum(fx < fc for fx, fc in zip(
+                        per_fold, [rr_metrics(g["ref_rr"], g["pred_rr"], g["patient_id"])["patient_macro_mae"]
+                                   for _, g in a.groupby("fold")]))
+                    if "breathnet2" in stem:    # the parent model is BreathNet, not the CNN
+                        bn_stem = f"{sig}_modwave_w60_breathnet"
+                        bk = [k for k in fk if k in _stem_folds(bn_stem, folds)]
+                        if bk:
+                            mb = _pooled_preds(bn_stem, bk).merge(b[["window_row", "pred_rr"]], on="window_row",
+                                                                  suffixes=("_bn", "_x"))
+                            pb = pd.DataFrame({"b": (mb["pred_rr_bn"] - mb["ref_rr"]).abs(),
+                                               "x": (mb["pred_rr_x"] - mb["ref_rr"]).abs(), "p": mb["patient_id"]}).groupby("p").mean()
+                            db = pb["x"] - pb["b"]
+                            row.update(better_than_bn=int((db < 0).sum()), n_patients_bn=int(len(db)),
+                                       mean_diff_bn=float(db.mean()), p_bn=float(wilcoxon(db).pvalue))
+                    row.update(n_common=int(len(m)), n_patients_common=int(len(d)),
+                               better_than_cnn=int((d < 0).sum()), median_diff=float(d.median()), mean_diff=float(d.mean()),
+                               p=float(wilcoxon(d).pvalue), err_corr=float(np.corrcoef(err_c, err_x)[0, 1]),
+                               folds_better_than_cnn=int(folds_better))
+                rows.append(row)
+    return rows
+
+
+def patient_ci(ref, pred, groups, n_boot=2000, seed=0):
+    """95 % bootstrap interval of the per-patient MAE, resampling patients."""
+    e = pd.Series(np.abs(np.asarray(pred, float) - np.asarray(ref, float))).groupby(np.asarray(groups)).mean().dropna()
+    if len(e) < 3:
+        return float("nan"), float("nan")
+    v = e.to_numpy()
+    rng = np.random.default_rng(seed)
+    boots = v[rng.integers(0, len(v), (n_boot, len(v)))].mean(1)
+    return float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))
+
+
+def per_fold_table(df, cols):
+    """Per-patient MAE of each estimator in each fold (same windows), with mean and SD."""
+    out = []
+    for col, label in cols:
+        vals = {int(k): rr_metrics(g["ref_rr"], g[col], g["patient_id"]).get("patient_macro_mae", np.nan)
+                for k, g in df.groupby("fold")}
+        v = np.array(list(vals.values()), float)
+        out.append({"estimator": label, "folds": vals, "mean": float(np.nanmean(v)),
+                    "sd": float(np.nanstd(v, ddof=1)) if np.isfinite(v).sum() > 1 else float("nan")})
+    return out
+
+
+def load_trends(sig, folds):
+    parts = [pd.read_parquet(p).assign(fold=k) for k in _folds(folds)
+             if (p := RUNS / f"trends_f{k}" / f"trend_{sig}.parquet").exists()]
+    return pd.concat(parts, ignore_index=True) if parts else None
+
+
+def breathnet_cv(folds):
+    """BreathNet ablations and learned parameters in every fold where they were exported."""
+    abl, learned = [], []
+    for k in _folds(folds):
+        for sig in SIGNALS:
+            a = RUNS / f"breathnet_f{k}" / f"{sig}_ablation.csv"
+            z = RUNS / f"breathnet_f{k}" / f"{sig}.npz"
+            if a.exists():
+                abl.append(pd.read_csv(a).assign(fold=k, signal=sig.upper()))
+            if z.exists():
+                d = np.load(z)
+                learned.append({"fold": k, "signal": sig.upper(), "median_sigma_s": float(np.median(d["sigma"][6:50])),
+                                "inverted_pathway": ["BW", "AM", "FM"][int(np.argmin(d["refine_corr"]))],
+                                "inversion_r": float(np.min(d["refine_corr"])),
+                                "half_rate_weights": d["harm"][:, 2].round(2).tolist(),
+                                "strongest_harmonic_pathway": ["BW", "AM", "FM"][int(np.argmax(d["harm"][:, :2].sum(1)))]})
+    return (pd.concat(abl, ignore_index=True) if abl else None), learned
+
+
+def fig_breathnet_cv(abl, out):
+    """Extra per-patient MAE when each component is switched off: one dot per fold, bar = mean."""
+    variants = [v for v in abl["variant"].unique() if v != "full model"]
+    sigs = list(dict.fromkeys(abl["signal"]))
+    fig, axes = plt.subplots(1, len(sigs), figsize=(5.8 * len(sigs), 0.42 * len(variants) + 1.4), sharey=True, squeeze=False)
+    for ax, sig in zip(axes[0], sigs):
+        t = abl[abl["signal"] == sig]
+        means = t.groupby("variant")["delta_patient_mae"].mean().reindex(variants)
+        y = np.arange(len(variants))
+        ax.barh(y, means.clip(lower=0.01), color=BLUE, alpha=0.35, height=0.6)
+        for i, v in enumerate(variants):
+            pts = t.loc[t["variant"] == v, "delta_patient_mae"].clip(lower=0.01)
+            ax.plot(pts, np.full(len(pts), i), "o", color=BLUE, ms=4)
+            ax.text(means[v] * 1.15 if means[v] > 0 else 0.012, i, f"{means[v]:+.2f}", va="center", fontsize=7.5, color=INK2)
+        ax.set_xscale("log")
+        ax.set_yticks(y, variants)
+        ax.invert_yaxis()
+        ax.set(title=f"{sig}: extra per-patient MAE when switched off", xlabel="bpm (log scale); dots = folds, bars = mean")
+        ax.grid(axis="y", visible=False)
+    fig.tight_layout()
+    path = out / "fig10_breathnet_cv.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def fig_arch_size(rows, out):
+    """Per-patient MAE vs parameter count, one panel per signal."""
+    done = [r for r in rows if not r.get("pending")]
+    if not done:
+        return None
+    sigs = [s for s in SIGNALS if any(r["signal"] == s for r in done)]
+    fig, axes = plt.subplots(1, len(sigs), figsize=(5.6 * len(sigs), 3.9), sharey=True, squeeze=False)
+    colors = {"BW/AM/FM spectrogram": BLUE, "raw-signal STFT": AQUA}
+    for ax, sig in zip(axes[0], sigs):
+        for r in (r for r in done if r["signal"] == sig):
+            c = ORANGE if "BreathNet" in r["model"] else colors[r["input"]]
+            if r.get("n_folds", 1) > 1 and np.isfinite(r.get("fold_sd", np.nan)):
+                ax.errorbar(r["params"], r["patient_macro_mae"], yerr=r["fold_sd"], color=c, alpha=0.5, lw=1, capsize=2, zorder=2)
+            ax.scatter(r["params"], r["patient_macro_mae"], s=40, color=c, zorder=3,
+                       marker="D" if r["is_baseline"] else "o")
+            short = r["model"].split(" (")[0].replace("Transformer, ", "TF ").replace(" on time-averaged spectrum", "")
+            ax.annotate(short, (r["params"], r["patient_macro_mae"]), xytext=(4, 3), textcoords="offset points",
+                        fontsize=7, color=INK2)
+        ax.set_xscale("log")
+        ax.set(title=f"{sig.upper()}: accuracy vs size", xlabel="parameters (log scale)")
+    axes[0][0].set_ylabel("per-patient MAE (bpm)")
+    from matplotlib.lines import Line2D
+    handles = [Line2D([], [], marker="o", ls="", color=BLUE, label="BW/AM/FM spectrogram input"),
+               Line2D([], [], marker="o", ls="", color=AQUA, label="raw-signal STFT input"),
+               Line2D([], [], marker="o", ls="", color=ORANGE, label="BreathNet (waveform input)"),
+               Line2D([], [], marker="D", ls="", color=INK2, label="CNN baseline")]
+    fig.legend(handles=handles, loc="lower center", ncol=4, fontsize=8, bbox_to_anchor=(0.5, -0.06))
+    fig.tight_layout()
+    path = out / "fig9_arch_size.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return path
 
 
 # ------------------------------------------------------------------ figures
@@ -145,7 +402,7 @@ def fig_method_bars(t, sig, out):
     ax.tick_params(axis="y", labelsize=7.5, colors=INK2)
     ax.set_xlim(0, t["mae"].max() * 1.25)
     fig.tight_layout()
-    fig.savefig(out / f"fig2_methods_{sig}.png", dpi=150)
+    fig.savefig(out / f"fig2_methods_{sig}.png", dpi=150, bbox_inches="tight")  # long labels
     plt.close(fig)
 
 
@@ -340,11 +597,11 @@ def case_rates(det):
                              for s in ("PPG", "ECG") for r in ("published", "corrected")}} for m in METHOD_ORDER]
 
 
-TREND_SERIES = [("dl", "DL (PPG)", BLUE), ("count_orig|smart", "CtO smart fusion", ORANGE),
+TREND_SERIES = [("dl", "DL (CNN)", BLUE), ("count_orig|smart", "CtO smart fusion", ORANGE),
                 ("ar_median|smart", "ARM corrected, smart fusion", AQUA)]
 
 
-def fig_trends(trend, out, n=3):
+def fig_trends(trend, out, n=3, sig="ppg"):
     from scripts.case_study import rolling_trend, trend_concordance
     trend = trend.sort_values(["patient_id", "t_epoch"]).copy()
     trend["hours"] = (trend["t_epoch"] - trend.groupby("patient_id")["t_epoch"].transform("min")) / 3600
@@ -365,12 +622,105 @@ def fig_trends(trend, out, n=3):
     np.atleast_1d(axes)[-1].set_xlabel("hours since start of recording (lines = 5-min rolling medians; "
                                         "grey dots = reference failed quality)")
     fig.tight_layout()
-    fig.savefig(out / "fig8_trends_ppg.png", dpi=140)
+    fig.savefig(out / f"fig8_trends_{sig}.png", dpi=140)
     plt.close(fig)
     ok = trend[trend["ref_ok"]]
     return [{"estimator": label, **trend_concordance(ok, col), **{k: v for k, v in rr_metrics(ok["ref_rr"], ok[col]).items()
                                                                   if k in ("mae", "coverage")}}
             for col, label, _ in TREND_SERIES], list(top)
+
+
+# ------------------------------------------------------------------ wearables
+WEARABLE = Path("dataset/01NVa_wearable")
+WEARABLE_RUNS = RUNS / "wearable"
+DEVICE = {"ppg": "SmartCare wrist PPG", "ecg": "Faros/ePatch chest ECG"}
+
+
+def fig_wearable_paired(summary, out):
+    """Per-patient MAE on the same windows: monitor input (x) vs wearable input (y),
+    for the CNN and the best signal-processing method, one panel per signal."""
+    sigs = [s for s in ("ppg", "ecg") if (WEARABLE_RUNS / f"predictions_{s}.parquet").exists()]
+    if not sigs:
+        return None
+    fig, axes = plt.subplots(1, len(sigs), figsize=(5.4 * len(sigs), 4.8), squeeze=False)
+    for ax, sig in zip(axes[0], sigs):
+        w = pd.read_parquet(WEARABLE_RUNS / f"predictions_{sig}.parquet")
+        m = pd.read_parquet(WEARABLE_RUNS / f"monitor_predictions_paired_{sig}.parquet")
+        lim = 0
+        for label, color, short in (("DL CNN", BLUE, "DL CNN"), ("ARM · smart fusion", ORANGE, "ARM smart fusion")):
+            if label not in w or label not in m:
+                continue
+            j = m[["patient_id", "ref_rr"]].assign(mon=m[label], wear=w.loc[m.index, label]).dropna()
+            per = j.assign(em=(j["mon"] - j["ref_rr"]).abs(), ew=(j["wear"] - j["ref_rr"]).abs()).groupby("patient_id")[["em", "ew"]].mean()
+            ax.scatter(per["em"], per["ew"], s=14, color=color, alpha=0.7, label=f"{short} ({len(per)} patients)",
+                       edgecolor="white", linewidth=0.4)
+            lim = max(lim, float(np.nanpercentile(per.to_numpy(), 98)))
+        lim = max(lim * 1.1, 2)
+        ax.plot([0, lim], [0, lim], color=INK2, lw=1, ls="--")
+        ax.set(xlim=(0, lim), ylim=(0, lim), xlabel="per-patient MAE, monitor input (bpm)",
+               ylabel="per-patient MAE, wearable input (bpm)", title=f"{sig.upper()}: monitor vs {DEVICE[sig]}")
+        ax.legend(fontsize=8, loc="upper left")
+        ax.text(0.97, 0.04, "above the line = worse on the wearable", transform=ax.transAxes, ha="right", fontsize=7.5, color=INK2)
+    fig.tight_layout()
+    path = out / "fig11_wearable_paired.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def fig_wearable_alignment(out):
+    """Ten seconds of the monitor's ECG / Pleth and the wearable's at the aligned time,
+    and how the device clocks relate to the monitor's."""
+    segs = pd.read_csv(WEARABLE / "segments.csv") if (WEARABLE / "segments.csv").exists() else None
+    al = pd.read_csv(WEARABLE / "alignment.csv")
+    if segs is None or segs.empty:
+        return None
+    fig = plt.figure(figsize=(11, 6.2))
+    gs = fig.add_gridspec(2, 3, width_ratios=[2.2, 2.2, 1.6])
+    for row, kind in enumerate(("ecg", "ppg")):
+        sk = segs[segs["kind"] == kind]
+        wp = WEARABLE / f"windows_{kind}_w60_s30.parquet"
+        if sk.empty or not wp.exists():
+            continue
+        w = pd.read_parquet(wp)
+        w = w[w[f"{kind}_ok"] & w["monitor_ok"] & w["ref_ok"]]
+        if w.empty:
+            continue
+        r = w.sample(1, random_state=3).iloc[0]
+        d = np.load(WEARABLE / "signals" / f"{r['segment_id']}.npz")
+        fs = 250.0 if kind == "ecg" else 100.0
+        a = int(r["start_s"] * fs)
+        x_w, x_m = d[kind][a:a + int(10 * fs)].astype(float), d[f"monitor_{kind}"][a:a + int(10 * fs)].astype(float)
+        t = np.arange(len(x_w)) / fs
+        z = lambda v: (v - np.nanmedian(v)) / (np.nanpercentile(v, 99) - np.nanpercentile(v, 1) + 1e-9)
+        ax = fig.add_subplot(gs[row, :2])
+        ax.plot(t, z(x_m) + 0.7, color=INK2, lw=0.9, label="monitor")
+        ax.plot(t, z(x_w) - 0.7, color=BLUE if kind == "ecg" else ORANGE, lw=0.9, label=DEVICE[kind])
+        ax.set(yticks=[], xlabel="seconds", title=f"{'ECG' if kind == 'ecg' else 'PPG'}: the same 10 s on both devices "
+               f"({r['patient_id']}, after alignment)")
+        ax.legend(fontsize=8, loc="upper right", ncol=2)
+    ax = fig.add_subplot(gs[:, 2])
+    acc = al[al["status"] == "aligned"].drop_duplicates("path")
+    for kind, color in (("ppg", ORANGE), ("ecg", BLUE)):
+        v = acc.loc[acc["kind"] == kind, "offset_minus_nominal_h"].dropna()
+        if len(v):
+            ax.hist(v, bins=np.arange(-12, 36, 0.5), color=color, alpha=0.75, label=f"{DEVICE[kind]} ({len(v)} files)")
+    ax.set(xlabel="monitor clock minus device clock (h)", ylabel="files", title="Device clocks vs the monitor")
+    ax.legend(fontsize=7.5)
+    fig.tight_layout()
+    path = out / "fig12_wearable_alignment.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
+def wearable_ctx(out):
+    p = WEARABLE_RUNS / "summary.json"
+    if not p.exists():
+        return None
+    s = json.loads(p.read_text())
+    s["figs"] = {"paired": fig_wearable_paired(s, out), "alignment": fig_wearable_alignment(out)}
+    return s
 
 
 # ------------------------------------------------------------------ report
@@ -386,24 +736,41 @@ def dataset_summary(windows):
             "rr_median": float(windows.loc[ok, "ref_rr"].median()),
             "rr_p5": float(windows.loc[ok, "ref_rr"].quantile(.05)),
             "rr_p95": float(windows.loc[ok, "ref_rr"].quantile(.95)),
-            "ratio_median": float(ratio.median()), "ratio_gt04": float((ratio > 0.4).mean())}
+            "ratio_median": float(ratio.median()), "ratio_gt04": float((ratio > 0.4).mean()),
+            **locked_rate_patients(windows[ok])}
+
+
+def locked_rate_patients(w, tol=0.15, min_frac=0.3, min_windows=240):
+    """Patients whose reference stays within +-tol bpm of one value for at least min_frac of their
+    usable windows (and >= 2 h of them, 30-s stride), as a ventilator set rate would."""
+    out, fracs = [], []
+    for pid, g in w.groupby("patient_id"):
+        mode = float(g["ref_rr"].round(1).mode().iloc[0])
+        frac = float((np.abs(g["ref_rr"] - mode) <= tol).mean())
+        fracs.append(frac)
+        if frac >= min_frac and len(g) >= min_windows:
+            out.append({"patient_id": pid, "rate": mode, "frac": frac, "hours": len(g) * 30 / 3600})
+    return {"locked": sorted(out, key=lambda r: -r["frac"]), "locked_median_frac": float(np.median(fracs))}
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--fold", type=int, default=0)
-    ap.add_argument("--out", default="reports/fold0")
+    ap.add_argument("--folds", type=int, nargs="+", default=None, help="folds to pool (default: 0)")
+    ap.add_argument("--fold", type=int, default=None, help="single fold (same as --folds N)")
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
-    out = Path(args.out)
+    folds = args.folds or [args.fold if args.fold is not None else 0]
+    cv = len(folds) > 1
+    out = Path(args.out or ("reports/cv" if cv else f"reports/fold{folds[0]}"))
     out.mkdir(parents=True, exist_ok=True)
 
     windows = pd.read_parquet(WINDOWS)
     fig_dataset(windows, out)
-    ctx = {"fold": args.fold, "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+    ctx = {"folds": folds, "cv": cv, "fold": folds[0], "date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
            "dataset": dataset_summary(windows), "figs": {"dataset": out / "fig1_dataset.png"},
            "signals": {}, "notebooks": []}
     for sig in SIGNALS:
-        t, df = comparison_table(sig, args.fold, windows)
+        t, df = comparison_table(sig, folds, windows)
         if t is None or "dl_mod" not in df:
             continue  # this signal's DL model or benchmark has not finished
         trad_col = best_traditional(df, "smart") or best_traditional(df, "median")
@@ -416,14 +783,29 @@ def main():
         fig_stratified(df, sig, cols, out)
         fig_example(windows, df, sig, out)
         dfr = df.assign(ratio=df["ref_rr"] / df["hr"])
+        for r in t.to_dict("records"):  # patient-level 95 % intervals for every finished estimator
+            if isinstance(r.get("column"), str) and r["column"] in df:
+                lo, hi = patient_ci(df["ref_rr"], df[r["column"]], df["patient_id"])
+                t.loc[t["column"] == r["column"], ["ci_lo", "ci_hi"]] = lo, hi
         rows = t.drop(columns=["column"], errors="ignore").to_dict("records")
         per_patient = (dfr.assign(e_dl=(dfr["dl_mod"] - dfr["ref_rr"]).abs(), e_tr=(dfr[trad_col] - dfr["ref_rr"]).abs())
                        .groupby("patient_id")[["e_dl", "e_tr"]].mean())
+        dl_all = load_dl(sig, "mod", folds)  # every test window of every finished fold, not only the benchmark ones
+        dl_full = rr_metrics(dl_all["ref_rr"], dl_all["pred_rr"], dl_all["patient_id"])
+        dl_full["ci_lo"], dl_full["ci_hi"] = patient_ci(dl_all["ref_rr"], dl_all["pred_rr"], dl_all["patient_id"])
+        dl_full["n_folds"] = int(dl_all["fold"].nunique())
+        fold_cols = [("dl_mod", DL_KINDS["mod"])] + ([("dl_raw", DL_KINDS["raw"])] if "dl_raw" in df else [])
+        fold_cols.append((trad_col, trad_label))
+        published = trad_col.replace("|smart", "|pub-smart")
+        if published in df:  # the same method as published, for scale
+            fold_cols.append((published, trad_label + ", as published"))
         ctx["signals"][sig] = {
             "rows": rows, "dl": True, "n_windows": len(df), "n_patients": int(df["patient_id"].nunique()),
-            "dl_full": json.loads((RUNS / f"{sig}_mod_w60_f{args.fold}" / "metrics.json").read_text())["test"],
+            "folds_used": sorted(int(k) for k in df["fold"].unique()),
+            "dl_full": dl_full,
             "best": next(r for r in rows if r["estimator"] == trad_label),
             "dl_better_patients": float((per_patient["e_dl"] < per_patient["e_tr"]).mean()),
+            "per_fold": per_fold_table(df, fold_cols) if cv else None,
             "range_dl": {r["bin"]: r for r in stratified(dfr, "dl_mod", "ref_rr", RANGES).to_dict("records")},
             "by_range": {c: stratified(dfr, c, "ref_rr", RANGES).to_dict("records") for c, _, _ in cols},
             "by_ratio": {c: stratified(dfr, c, "ratio", RATIOS).to_dict("records") for c, _, _ in cols},
@@ -435,10 +817,13 @@ def main():
         if fix:
             fig_fix(fix, sig, out)
             ctx["signals"][sig]["fix"] = fix
+            if cv and 0 in df["fold"].unique():  # fold 0 alone: its test patients played no part in choosing the fix
+                ctx["signals"][sig]["fix_fold0"] = fix_rows(df[df["fold"] == 0])
 
-    # sample windows: chosen from the PPG model's test predictions, all signals shown
+    # sample windows: chosen from fold 0's PPG test predictions (the captions and caveats describe those
+    # windows, so they must not change as other folds finish); all signals shown
     from scripts.case_study import pick_cases, window_detail
-    test = load_dl("ppg", "mod", args.fold)
+    test = load_dl("ppg", "mod", 0)
     ctx["cases"] = []
     if test is not None:
         test = test.rename(columns={"pred_rr": "dl_mod"})
@@ -449,10 +834,24 @@ def main():
             ctx["cases"].append({**case, "fig": out / f"fig7_case{i}.png", "rates": case_rates(det),
                                  "ratio": case["ref_rr"] / case["hr"]})
 
-    trend_file = RUNS / f"trends_f{args.fold}" / "trend_ppg.parquet"
-    if trend_file.exists():
-        conc, patients = fig_trends(pd.read_parquet(trend_file), out)
-        ctx["trend"] = {"fig": out / "fig8_trends_ppg.png", "concordance": conc, "patients": patients}
+    ctx["arch"] = arch_comparison(folds)
+    ctx["figs"]["arch_size"] = fig_arch_size(ctx["arch"], out)
+
+    ctx["trend"] = {}
+    for sig in SIGNALS:
+        tr = load_trends(sig, folds)
+        if tr is not None:
+            conc, patients = fig_trends(tr, out, sig=sig)
+            ctx["trend"][sig] = {"fig": out / f"fig8_trends_{sig}.png", "concordance": conc, "patients": patients,
+                                 "n_folds": int(tr["fold"].nunique()), "n_patients": int(tr["patient_id"].nunique())}
+
+    abl, learned = breathnet_cv(folds)
+    if abl is not None:
+        ctx["breathnet_cv"] = {"ablation": abl.to_dict("records"), "learned": learned,
+                               "n_folds": int(abl["fold"].nunique()), "fig": fig_breathnet_cv(abl, out)}
+
+    if cv:   # the wearable evaluation uses every fold's model (each patient scored by the fold that tested it)
+        ctx["wearable"] = wearable_ctx(out)
 
     for nb in sorted(out.glob("[0-9][0-9]_*.html")):
         ctx["notebooks"].append((f"Notebook: {nb.stem[3:].replace('_', ' ')}", nb.name))
@@ -463,8 +862,11 @@ def main():
     for s in summary["signals"].values():
         s.pop("figs", None)
     summary["cases"] = [{k: v for k, v in c.items() if k != "fig"} for c in ctx["cases"]]
-    if "trend" in summary:
-        summary["trend"] = {k: v for k, v in ctx["trend"].items() if k != "fig"}
+    summary["trend"] = {sig: {k: v for k, v in t.items() if k != "fig"} for sig, t in ctx["trend"].items()}
+    if ctx.get("wearable"):
+        summary["wearable"] = {k: v for k, v in ctx["wearable"].items() if k != "figs"}
+    if "breathnet_cv" in summary:
+        summary["breathnet_cv"] = {k: v for k, v in ctx["breathnet_cv"].items() if k != "fig"}
     (out / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
     print(f"report written to {out}/report.html")
 

@@ -1,6 +1,8 @@
 """Spectrogram inputs for the deep-learning RR estimator.
 
-Two input kinds:
+Four input kinds (``modwave`` = the BW/AM/FM waveforms themselves, for BreathNet;
+``modwave_hr`` adds the instantaneous heart rate as a fourth channel, for BreathNet-2's
+heart-rate prior):
 
 ``modulation`` (default)
     BW, AM and FM respiratory signals are extracted from the PPG/ECG (see
@@ -34,7 +36,7 @@ EPS = 1e-12
 
 @dataclass
 class SpecConfig:
-    kind: str = "modulation"     # "modulation" or "raw"
+    kind: str = "modulation"     # "modulation", "raw", "modwave" or "modwave_hr"
     stft_window_s: float = 16.0  # frequency resolution ~ 1 / stft_window_s Hz
     hop_s: float = 1.0
     nfft_modulation: int = 256   # at 4 Hz -> 0.94 bpm bin spacing
@@ -79,7 +81,27 @@ def raw_spectrogram(x, fs, cfg=SpecConfig()):
     return s[None].astype(np.float32)
 
 
+def modulation_waveforms(x, fs, signal_type, cfg=SpecConfig()):
+    """(3, N) array: the BW, AM and FM respiratory signals themselves at 4 Hz,
+    each z-scored, or ``None`` when any could not be extracted. Input of the
+    physiology-inspired :class:`dl.model.BreathNet`, which does its own
+    frequency analysis with a learnable resonator bank."""
+    rs = extract_resp_signals(x, fs, signal_type, band=(cfg.band_low_hz, cfg.band_high_hz))
+    if any(m not in rs.signals for m in MODULATIONS):
+        return None
+    sig = np.stack([rs.signals[m] for m in MODULATIONS])
+    sig = (sig - sig.mean(1, keepdims=True)) / (sig.std(1, keepdims=True) + 1e-9)
+    if cfg.kind == "modwave_hr":
+        # heart rate in bpm / 100, *not* normalised: its level is the information
+        if rs.hr_series is None or len(rs.hr_series) < sig.shape[1]:
+            return None
+        sig = np.concatenate([sig, rs.hr_series[None, :sig.shape[1]] / 100.0])
+    return sig.astype(np.float32)
+
+
 def make_features(x, fs, signal_type, cfg=SpecConfig()):
+    if cfg.kind in ("modwave", "modwave_hr"):
+        return modulation_waveforms(x, fs, signal_type, cfg)
     if cfg.kind == "modulation":
         return modulation_spectrogram(x, fs, signal_type, cfg)
     if cfg.kind == "raw":
@@ -90,6 +112,8 @@ def make_features(x, fs, signal_type, cfg=SpecConfig()):
 def feature_shape(window_s, cfg=SpecConfig()):
     """Shape produced for a window of ``window_s`` seconds (used to allocate
     the on-disk array before computing)."""
+    if cfg.kind in ("modwave", "modwave_hr"):
+        return (len(MODULATIONS) + (cfg.kind == "modwave_hr"), int(window_s * RESP_FS))
     fs = RESP_FS if cfg.kind == "modulation" else cfg.raw_fs
     probe = np.random.default_rng(0).standard_normal(int(window_s * fs))
     if cfg.kind == "modulation":

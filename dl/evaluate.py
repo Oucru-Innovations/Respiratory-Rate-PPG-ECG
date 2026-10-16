@@ -16,7 +16,7 @@ import pandas as pd
 import torch
 
 from common.metrics import metrics_by_range, rr_metrics
-from dl.model import LabelDistribution, SpectroCNN
+from dl.model import LabelDistribution, build_model
 from dl.train import make_loader, predict
 
 
@@ -38,7 +38,7 @@ def main():
         raise SystemExit(f"feature config mismatch:\n{feat_cfg}\nvs checkpoint\n{ckpt['features']}")
 
     ldl = LabelDistribution(sigma=ckpt["ldl"]["sigma"]).to(device)
-    model = SpectroCNN(**ckpt["model"]).to(device)
+    model = build_model(**ckpt["model"]).to(device)
     model.load_state_dict(ckpt["state_dict"])
 
     index = pd.read_parquet(feat_dir / "index.parquet")
